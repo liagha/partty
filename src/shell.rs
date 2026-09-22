@@ -75,17 +75,86 @@ impl Shell {
         let _ = self._pair.master.resize(Self::size(rows, cols));
     }
 
-    pub fn key(state: ElementState, repeat: bool, logical: &Key, text: Option<&str>) -> Option<Vec<u8>> {
+    pub fn key(
+        state: ElementState,
+        repeat: bool,
+        logical: &Key,
+        text: Option<&str>,
+        ctrl: bool,
+        alt: bool,
+    ) -> Option<Vec<u8>> {
         if state != ElementState::Pressed || repeat {
             return None;
         }
-        match logical {
-            Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
-            Key::Named(NamedKey::Backspace) => Some(b"\x7f".to_vec()),
-            Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
-            Key::Named(NamedKey::Escape) => Some(b"\x1b".to_vec()),
-            _ => text.map(|text| text.as_bytes().to_vec()),
+        if ctrl {
+            let mut code = match logical {
+                Key::Character(c) => Self::control(c)?,
+                Key::Named(key) => Self::modified(key)?,
+                _ => return None,
+            };
+            if alt {
+                code.insert(0, 0x1b);
+            }
+            return Some(code);
         }
+        let mut base = match logical {
+            Key::Named(NamedKey::Enter) => b"\r".to_vec(),
+            Key::Named(NamedKey::Backspace) => b"\x7f".to_vec(),
+            Key::Named(NamedKey::Tab) => b"\t".to_vec(),
+            Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
+            Key::Named(NamedKey::ArrowUp) => b"\x1b[A".to_vec(),
+            Key::Named(NamedKey::ArrowDown) => b"\x1b[B".to_vec(),
+            Key::Named(NamedKey::ArrowRight) => b"\x1b[C".to_vec(),
+            Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
+            Key::Named(NamedKey::Home) => b"\x1b[H".to_vec(),
+            Key::Named(NamedKey::End) => b"\x1b[F".to_vec(),
+            Key::Named(NamedKey::Insert) => b"\x1b[2~".to_vec(),
+            Key::Named(NamedKey::Delete) => b"\x1b[3~".to_vec(),
+            Key::Named(NamedKey::PageUp) => b"\x1b[5~".to_vec(),
+            Key::Named(NamedKey::PageDown) => b"\x1b[6~".to_vec(),
+            _ => text.map(|text| text.as_bytes().to_vec())?,
+        };
+        if alt {
+            base.insert(0, 0x1b);
+        }
+        Some(base)
+    }
+
+    fn control(c: &str) -> Option<Vec<u8>> {
+        let held = c.as_bytes();
+        if held.len() != 1 {
+            return None;
+        }
+        let code = match held[0] {
+            b'a'..=b'z' => held[0] - b'a' + 1,
+            b'A'..=b'Z' => held[0] - b'A' + 1,
+            b' ' | b'@' => 0,
+            b'[' => 27,
+            b'\\' => 28,
+            b']' => 29,
+            b'^' => 30,
+            b'_' | b'/' => 31,
+            b'?' => 127,
+            _ => return None,
+        };
+        Some(vec![code])
+    }
+
+    fn modified(key: &NamedKey) -> Option<Vec<u8>> {
+        let seq = match key {
+            NamedKey::ArrowUp => "\x1b[1;5A",
+            NamedKey::ArrowDown => "\x1b[1;5B",
+            NamedKey::ArrowRight => "\x1b[1;5C",
+            NamedKey::ArrowLeft => "\x1b[1;5D",
+            NamedKey::Home => "\x1b[1;5H",
+            NamedKey::End => "\x1b[1;5F",
+            NamedKey::Insert => "\x1b[2;5~",
+            NamedKey::Delete => "\x1b[3;5~",
+            NamedKey::PageUp => "\x1b[5;5~",
+            NamedKey::PageDown => "\x1b[6;5~",
+            _ => return None,
+        };
+        Some(seq.as_bytes().to_vec())
     }
 }
 
@@ -100,6 +169,8 @@ mod test {
             false,
             &Key::Named(NamedKey::Enter),
             Some("\r"),
+            false,
+            false,
         );
         assert_eq!(key, Some(b"\r".to_vec()));
     }
@@ -111,8 +182,41 @@ mod test {
             false,
             &Key::Named(NamedKey::Enter),
             Some("\r"),
+            false,
+            false,
         );
         assert_eq!(key, None);
+    }
+
+    #[test]
+    fn arrows_send_csi() {
+        let up = Shell::key(
+            ElementState::Pressed,
+            false,
+            &Key::Named(NamedKey::ArrowUp),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(up, Some(b"\x1b[A".to_vec()));
+        let down = Shell::key(
+            ElementState::Pressed,
+            false,
+            &Key::Named(NamedKey::ArrowDown),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(down, Some(b"\x1b[B".to_vec()));
+        let del = Shell::key(
+            ElementState::Pressed,
+            false,
+            &Key::Named(NamedKey::Delete),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(del, Some(b"\x1b[3~".to_vec()));
     }
 
     #[test]
@@ -122,7 +226,44 @@ mod test {
             false,
             &Key::Character("l".into()),
             Some("l"),
+            false,
+            false,
         );
         assert_eq!(key, Some(b"l".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_sends_codes() {
+        let rom = |logical: &Key| Shell::key(ElementState::Pressed, false, logical, None, true, false);
+        assert_eq!(
+            rom(&Key::Character("c".into())),
+            Some(vec![3]),
+            "ctrl+c interrupts"
+        );
+        assert_eq!(rom(&Key::Character("d".into())), Some(vec![4]), "ctrl+d exits");
+        assert_eq!(rom(&Key::Character("C".into())), Some(vec![3]), "caps maps same");
+        assert_eq!(
+            rom(&Key::Named(NamedKey::ArrowUp)),
+            Some(b"\x1b[1;5A".to_vec()),
+            "ctrl+arrows modify"
+        );
+        assert_eq!(
+            rom(&Key::Named(NamedKey::Enter)),
+            None,
+            "ctrl+enter has no code"
+        );
+    }
+
+    #[test]
+    fn alt_prefixes_esc() {
+        let key = Shell::key(
+            ElementState::Pressed,
+            false,
+            &Key::Character("f".into()),
+            Some("f"),
+            false,
+            true,
+        );
+        assert_eq!(key, Some(b"\x1bf".to_vec()));
     }
 }

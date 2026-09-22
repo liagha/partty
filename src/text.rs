@@ -12,6 +12,15 @@ const SIZE: f32 = 30.0;
 const PAD: f32 = 24.0;
 const LINE: f32 = SIZE * 1.5;
 const ADV: f32 = SIZE * 0.6;
+const FACE: &str = "DejaVu Sans Mono";
+
+#[derive(Clone, Copy)]
+pub struct Geo {
+    pub adv: f32,
+    pub step: f32,
+    pub pad: f32,
+    pub scale: f32,
+}
 
 pub struct Text {
     font: FontSystem,
@@ -53,7 +62,7 @@ impl Text {
         (rows, cols)
     }
 
-    fn advance(width: u32, height: u32, scale: f32) -> f32 {
+    pub fn advance(width: u32, height: u32, scale: f32) -> f32 {
         let (_, inner_h, _) = Self::layout(width, height, scale);
         let (rows, _) = Self::cells(width, height, scale);
         inner_h / rows.max(1) as f32
@@ -101,7 +110,11 @@ impl Text {
             .map(|line| {
                 vec![Span {
                     hue: Color::rgb(FORE[0], FORE[1], FORE[2]),
+                    back: None,
                     text: line.to_string(),
+                    under: false,
+                    strike: false,
+                    col: 0,
                 }]
             })
             .collect();
@@ -109,9 +122,9 @@ impl Text {
         text
     }
 
-    pub fn show(&mut self, lines: &[Vec<Span>]) {
+    pub fn show(&mut self, lines: &[Vec<Span>]) -> Geo {
         let plain = Attrs {
-            family: Family::Name("Vazirmatn"),
+            family: Family::Name(FACE),
             ..Attrs::new()
         };
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
@@ -120,7 +133,7 @@ impl Text {
                 spans.push((
                     "\n",
                     Attrs {
-                        family: Family::Name("Vazirmatn"),
+                        family: Family::Name(FACE),
                         ..Attrs::new()
                     },
                 ));
@@ -129,7 +142,7 @@ impl Text {
                 spans.push((
                     span.text.as_str(),
                     Attrs {
-                        family: Family::Name("Vazirmatn"),
+                        family: Family::Name(FACE),
                         color_opt: Some(span.hue),
                         ..Attrs::new()
                     },
@@ -139,6 +152,21 @@ impl Text {
         self.buffer
             .set_rich_text(spans.into_iter(), &plain, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font, false);
+        let adv = self
+            .buffer
+            .layout_runs()
+            .filter_map(|run| {
+                let xs: Vec<f32> = run.glyphs.iter().map(|g| g.x).collect();
+                (xs.len() >= 2).then(|| (xs[1] - xs[0]).abs())
+            })
+            .next()
+            .unwrap_or(ADV);
+        Geo {
+            adv,
+            step: self.buffer.metrics().line_height,
+            pad: PAD * self.scale,
+            scale: self.scale,
+        }
     }
 
     pub fn resize(&mut self, queue: &Queue, width: u32, height: u32, scale: f32) {

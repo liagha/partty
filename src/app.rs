@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
+use crate::clip::Clip;
 use crate::config::Config;
 use crate::grid::Grid;
 use crate::shell::Shell;
@@ -19,6 +21,12 @@ pub struct App {
     grid: Grid,
     parse: vte::Parser,
     wake: Option<EventLoopProxy<()>>,
+    mods: ModifiersState,
+    at: (f32, f32),
+    drag: bool,
+    anchor: Option<(usize, usize)>,
+    held: u8,
+    roll: f32,
 }
 
 impl App {
@@ -35,7 +43,15 @@ impl App {
         loop {
             match self.inbox.as_ref().map(|inbox| inbox.try_recv()) {
                 Some(Ok(bytes)) => {
+                    let was = self.grid.cursor();
                     self.parse.advance(&mut self.grid, &bytes);
+                    self.grid.moved(was);
+                    let reply = self.grid.take_reply();
+                    if !reply.is_empty() {
+                        if let Some(shell) = self.shell.as_mut() {
+                            shell.write(&reply);
+                        }
+                    }
                     fresh = true;
                 }
                 _ => break,
@@ -54,6 +70,55 @@ impl App {
         let styled = self.grid.spans();
         if let Some(view) = self.view.as_mut() {
             view.show(&styled);
+        }
+    }
+
+    fn pick(&self) -> Option<(usize, usize)> {
+        let view = self.view.as_ref()?;
+        let (row, col) = view.cell(self.at.0, self.at.1)?;
+        self.grid.at(row, col)
+    }
+
+    fn spot(&self) -> Option<(usize, usize)> {
+        let view = self.view.as_ref()?;
+        view.cell(self.at.0, self.at.1)
+    }
+
+    fn press(&mut self, button: MouseButton, state: ElementState) {
+        let btn = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            _ => return,
+        };
+        let Some((row, col)) = self.spot() else {
+            return;
+        };
+        match state {
+            ElementState::Pressed => {
+                self.held = btn;
+                self.drag = true;
+                self.grid.click(btn, row, col, true);
+            }
+            ElementState::Released => {
+                self.drag = false;
+                self.grid.click(btn, row, col, false);
+            }
+        }
+    }
+
+    fn copy(&self) {
+        if self.grid.marked() {
+            Clip::copy(&self.grid.selected());
+        }
+    }
+
+    fn paste(&mut self, primary: bool) {
+        let text = Clip::paste(primary);
+        if !text.is_empty() {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.write(text.as_bytes());
+            }
         }
     }
 
@@ -114,26 +179,101 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let bytes = Shell::key(
-                    event.state,
-                    event.repeat,
-                    &event.logical_key,
-                    event.text.as_deref(),
-                );
-                if let Some(bytes) = bytes {
-                    if let Some(shell) = self.shell.as_mut() {
-                        shell.write(&bytes);
+                let hot = self.mods.control_key() && self.mods.shift_key();
+                let press = event.state == ElementState::Pressed && !event.repeat;
+                match &event.logical_key {
+                    Key::Character(c) if hot && press && (c == "c" || c == "C") => self.copy(),
+                    Key::Character(c) if hot && press && (c == "v" || c == "V") => {
+                        self.paste(false)
+                    }
+                    _ => {
+                        let bytes = Shell::key(
+                            event.state,
+                            event.repeat,
+                            &event.logical_key,
+                            event.text.as_deref(),
+                            self.mods.control_key(),
+                            self.mods.alt_key(),
+                        );
+                        if let Some(bytes) = bytes {
+                            if let Some(shell) = self.shell.as_mut() {
+                                shell.write(&bytes);
+                            }
+                        }
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.mods = mods.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.at = (position.x as f32, position.y as f32);
+                if self.grid.mouse() {
+                    if self.drag && self.grid.motion() {
+                        if let Some((row, col)) = self.spot() {
+                            self.grid.click(self.held, row, col, true);
+                        }
+                    }
+                } else if self.drag {
+                    if let (Some(from), Some(to)) = (self.anchor, self.pick()) {
+                        self.grid.select(from, to);
+                        self.show();
+                        window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                if self.grid.mouse() {
+                    self.press(button, state);
+                } else {
+                    match (button, state) {
+                        (MouseButton::Left, ElementState::Pressed) => {
+                            self.anchor = self.pick();
+                            self.drag = self.anchor.is_some();
+                            match self.anchor {
+                                Some(cell) => self.grid.select(cell, cell),
+                                None => self.grid.unmark(),
+                            }
+                            self.show();
+                            window.request_redraw();
+                        }
+                        (MouseButton::Left, ElementState::Released) => {
+                            self.drag = false;
+                            self.copy();
+                        }
+                        (MouseButton::Middle, ElementState::Pressed) => self.paste(true),
+                        _ => {}
                     }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as f32,
-                };
-                self.grid.wheel(lines);
-                self.show();
-                window.request_redraw();
+                if self.grid.mouse() {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            self.roll += pos.y as f32 / 20.0;
+                            let n = self.roll.trunc();
+                            self.roll -= n;
+                            n
+                        }
+                    };
+                    let n = lines.trunc() as i32;
+                    if n != 0 {
+                        if let Some((row, col)) = self.spot() {
+                            for _ in 0..n.abs() {
+                                self.grid.roll(row, col, n > 0);
+                            }
+                        }
+                    }
+                } else {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as f32,
+                    };
+                    self.grid.wheel(lines);
+                    self.show();
+                    window.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(view) = self.view.as_mut() {

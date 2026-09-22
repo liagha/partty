@@ -6,8 +6,9 @@ use wgpu::{
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::fill::Fill;
 use crate::grid::Span;
-use crate::text::Text;
+use crate::text::{Geo, Text};
 
 pub struct View {
     instance: wgpu::Instance,
@@ -16,8 +17,10 @@ pub struct View {
     queue: Queue,
     config: SurfaceConfiguration,
     text: Text,
+    fill: Fill,
     window: Arc<Window>,
     bg: wgpu::Color,
+    geo: Option<Geo>,
 }
 
 impl View {
@@ -79,6 +82,7 @@ impl View {
             size.height.max(1),
             scale,
         );
+        let fill = Fill::open(&device, config.format);
         Self {
             instance,
             surface,
@@ -86,6 +90,7 @@ impl View {
             queue,
             config,
             text,
+            fill,
             window,
             bg: wgpu::Color {
                 r: bg[0],
@@ -93,6 +98,7 @@ impl View {
                 b: bg[2],
                 a: 1.0,
             },
+            geo: None,
         }
     }
 
@@ -103,7 +109,21 @@ impl View {
     }
 
     pub fn show(&mut self, lines: &[Vec<Span>]) {
-        self.text.show(lines);
+        let geo = self.text.show(lines);
+        self.geo = Some(geo);
+        let boxes = crate::fill::rects(lines, &geo);
+        self.fill
+            .paint(&self.queue, &boxes, self.config.width, self.config.height);
+    }
+
+    pub fn cell(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let geo = self.geo?;
+        if geo.adv <= 0.0 || geo.step <= 0.0 {
+            return None;
+        }
+        let col = ((x - geo.pad) / geo.adv).floor() as i32;
+        let row = ((y - geo.pad) / geo.step).floor() as i32;
+        (row >= 0 && col >= 0).then(|| (row as usize, col as usize))
     }
 
     pub fn draw(&mut self) {
@@ -145,6 +165,7 @@ impl View {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            self.fill.draw(&mut pass);
             self.text.render(&mut pass);
         }
         self.queue.submit([encoder.finish()]);

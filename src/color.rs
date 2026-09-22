@@ -5,13 +5,28 @@ pub use glyphon::Color;
 pub const FORE: [u8; 3] = [0xE6, 0xE6, 0xEB];
 pub const BACK: [u8; 3] = [0x4B, 0x4B, 0x54];
 
-pub fn hex(text: &str) -> Option<[u8; 3]> {
-    let text = text.strip_prefix('#').unwrap_or(text);
+pub fn hex(text: &str) -> Option<[u8; 3]> {    let text = text.strip_prefix('#').unwrap_or(text);
     if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let n = u32::from_str_radix(text, 16).ok()?;
     Some([(n >> 16) as u8, (n >> 8) as u8, n as u8])
+}
+
+pub fn linear(rgb: [u8; 3]) -> [f32; 3] {
+    let to = |byte: u8| {
+        let v = byte as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [to(rgb[0]), to(rgb[1]), to(rgb[2])]
+}
+
+pub fn flat(dye: Color) -> [f32; 3] {
+    linear([dye.r(), dye.g(), dye.b()])
 }
 
 #[derive(Deserialize, Default)]
