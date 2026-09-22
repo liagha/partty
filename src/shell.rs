@@ -1,4 +1,3 @@
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
@@ -27,7 +26,6 @@ impl Shell {
         cols: usize,
         wake: EventLoopProxy<()>,
     ) -> (Self, Receiver<Vec<u8>>) {
-        let _ = std::fs::write("/tmp/partty-pty.log", "");
         let system = portable_pty::native_pty_system();
         let pair = system.openpty(Self::size(rows, cols)).unwrap();
         let name = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
@@ -38,16 +36,11 @@ impl Shell {
         let writer = pair.master.take_writer().unwrap();
         let (send, recv) = channel();
         thread::spawn(move || {
-            let mut log = OpenOptions::new()
-                .append(true)
-                .open("/tmp/partty-pty.log")
-                .unwrap();
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let _ = log.write_all(&buf[..n]);
                         if send.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
@@ -71,19 +64,21 @@ impl Shell {
         let _ = self.writer.flush();
     }
 
-    pub fn resize(&self, rows: usize, cols: usize) {
-        let _ = self._pair.master.resize(Self::size(rows, cols));
+    pub fn resize(&self, rows: usize, cols: usize) -> Result<(), String> {
+        self._pair
+            .master
+            .resize(Self::size(rows, cols))
+            .map_err(|e| e.to_string())
     }
 
     pub fn key(
         state: ElementState,
-        repeat: bool,
         logical: &Key,
         text: Option<&str>,
         ctrl: bool,
         alt: bool,
     ) -> Option<Vec<u8>> {
-        if state != ElementState::Pressed || repeat {
+        if state != ElementState::Pressed {
             return None;
         }
         if ctrl {
@@ -166,7 +161,6 @@ mod test {
     fn enter_sends_cr() {
         let key = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Named(NamedKey::Enter),
             Some("\r"),
             false,
@@ -179,7 +173,6 @@ mod test {
     fn release_sends_nothing() {
         let key = Shell::key(
             ElementState::Released,
-            false,
             &Key::Named(NamedKey::Enter),
             Some("\r"),
             false,
@@ -192,7 +185,6 @@ mod test {
     fn arrows_send_csi() {
         let up = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Named(NamedKey::ArrowUp),
             None,
             false,
@@ -201,7 +193,6 @@ mod test {
         assert_eq!(up, Some(b"\x1b[A".to_vec()));
         let down = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Named(NamedKey::ArrowDown),
             None,
             false,
@@ -210,7 +201,6 @@ mod test {
         assert_eq!(down, Some(b"\x1b[B".to_vec()));
         let del = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Named(NamedKey::Delete),
             None,
             false,
@@ -223,7 +213,6 @@ mod test {
     fn text_sends_bytes() {
         let key = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Character("l".into()),
             Some("l"),
             false,
@@ -234,7 +223,7 @@ mod test {
 
     #[test]
     fn ctrl_sends_codes() {
-        let rom = |logical: &Key| Shell::key(ElementState::Pressed, false, logical, None, true, false);
+        let rom = |logical: &Key| Shell::key(ElementState::Pressed, logical, None, true, false);
         assert_eq!(
             rom(&Key::Character("c".into())),
             Some(vec![3]),
@@ -258,7 +247,6 @@ mod test {
     fn alt_prefixes_esc() {
         let key = Shell::key(
             ElementState::Pressed,
-            false,
             &Key::Character("f".into()),
             Some("f"),
             false,

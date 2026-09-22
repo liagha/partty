@@ -1,26 +1,50 @@
 use serde::Deserialize;
 
 use crate::color::{self, Colors, Palette};
+use crate::text::SIZE;
 
 #[derive(Deserialize, Default)]
 struct File {
     background: Option<String>,
     foreground: Option<String>,
     past_bottom: Option<usize>,
+    font_size: Option<f32>,
     colors: Option<Colors>,
 }
 
 pub struct Config {
     pub bg: [f64; 3],
     pub below: Option<usize>,
+    pub size: f32,
     pub inks: Palette,
 }
 
 impl Config {
     const FALLBACK: &str = "#1e1e1e";
 
-    pub fn load() -> Self {
-        let text = std::fs::read_to_string("config.toml").unwrap_or_default();
+    pub fn load() -> (Self, Option<std::path::PathBuf>) {
+        if let Some(found) = Self::path() {
+            return (Self::load_from(&found), Some(found));
+        }
+        (Self::parse(""), None)
+    }
+
+    fn path() -> Option<std::path::PathBuf> {
+        let local = std::path::PathBuf::from("config.toml");
+        if local.is_file() {
+            return Some(local);
+        }
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+            })?;
+        let file = base.join("partty").join("config.toml");
+        file.is_file().then_some(file)
+    }
+
+    pub fn load_from(path: &std::path::Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
         Self::parse(&text)
     }
 
@@ -45,6 +69,7 @@ impl Config {
         Self {
             bg: Self::linear(back),
             below: file.past_bottom,
+            size: file.font_size.filter(|s| (8.0..=96.0).contains(s)).unwrap_or(SIZE),
             inks,
         }
     }
@@ -73,10 +98,26 @@ mod test {
     }
 
     #[test]
+    fn load_from_reads_file() {
+        let path = std::env::temp_dir().join("partty-test-config.toml");
+        std::fs::write(&path, "font_size = 20\n").unwrap();
+        let config = Config::load_from(&path);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(config.size, 20.0);
+    }
+
+    #[test]
     fn parse_full() {
         let config = Config::parse("background = \"#000000\"\npast_bottom = 5\n");
         assert!(close(config.bg, [0.0, 0.0, 0.0]));
         assert_eq!(config.below, Some(5));
+    }
+
+    #[test]
+    fn font_size_bounds() {
+        assert_eq!(Config::parse("font_size = 20\n").size, 20.0);
+        assert_eq!(Config::parse("font_size = 200\n").size, SIZE);
+        assert_eq!(Config::parse("").size, SIZE);
     }
 
     #[test]

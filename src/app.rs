@@ -27,6 +27,8 @@ pub struct App {
     anchor: Option<(usize, usize)>,
     held: u8,
     roll: f32,
+    font: f32,
+    next: Option<std::time::Instant>,
 }
 
 impl App {
@@ -38,6 +40,15 @@ impl App {
         event.run_app(&mut app).unwrap();
     }
 
+    fn flush(&mut self) {
+        let reply = self.grid.take_reply();
+        if !reply.is_empty() {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.write(&reply);
+            }
+        }
+    }
+
     fn feed(&mut self) -> bool {
         let mut fresh = false;
         loop {
@@ -46,12 +57,8 @@ impl App {
                     let was = self.grid.cursor();
                     self.parse.advance(&mut self.grid, &bytes);
                     self.grid.moved(was);
-                    let reply = self.grid.take_reply();
-                    if !reply.is_empty() {
-                        if let Some(shell) = self.shell.as_mut() {
-                            shell.write(&reply);
-                        }
-                    }
+                    self.grid.lit();
+                    self.flush();
                     fresh = true;
                 }
                 _ => break,
@@ -59,6 +66,11 @@ impl App {
         }
         if fresh {
             self.show();
+            if let Some(title) = self.grid.take_title() {
+                if let Some(window) = self.window.as_ref() {
+                    window.set_title(&title);
+                }
+            }
         }
         fresh
     }
@@ -117,7 +129,7 @@ impl App {
         let text = Clip::paste(primary);
         if !text.is_empty() {
             if let Some(shell) = self.shell.as_mut() {
-                shell.write(text.as_bytes());
+                shell.write(&Clip::wrap(&text, self.grid.pastes()));
             }
         }
     }
@@ -128,10 +140,15 @@ impl App {
             None => return,
         };
         let size = window.inner_size();
-        let (rows, cols) = Text::cells(size.width, size.height, window.scale_factor() as f32);
+        let (rows, cols) = Text::cells(
+            size.width,
+            size.height,
+            window.scale_factor() as f32,
+            self.font,
+        );
         self.grid.resize(rows, cols);
         if let Some(shell) = self.shell.as_mut() {
-            shell.resize(rows, cols);
+            let _ = shell.resize(rows, cols);
         }
         self.show();
     }
@@ -144,10 +161,20 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes().with_title("partty");
         let window = Arc::new(loop_.create_window(attrs).unwrap());
-        let config = Config::load();
-        self.view = Some(View::open(window.clone(), loop_, config.bg));
+        let (config, source) = Config::load();
+        self.font = config.size;
+        self.view = Some(View::open(window.clone(), loop_, config.bg, config.size));
         let size = window.inner_size();
-        let (rows, cols) = Text::cells(size.width, size.height, window.scale_factor() as f32);
+        let (rows, cols) = Text::cells(
+            size.width,
+            size.height,
+            window.scale_factor() as f32,
+            config.size,
+        );
+        let origin = source
+            .map(|s| s.display().to_string())
+            .unwrap_or("<defaults>".into());
+        eprintln!("partty: {rows}x{cols} font={} config={origin}", config.size);
         self.grid = Grid::new(rows, cols, config.below.unwrap_or(rows), config.inks);
         let wake = self.wake.clone().expect("proxy");
         let (shell, inbox) = Shell::open(rows, cols, wake);
@@ -182,14 +209,19 @@ impl ApplicationHandler for App {
                 let hot = self.mods.control_key() && self.mods.shift_key();
                 let press = event.state == ElementState::Pressed && !event.repeat;
                 match &event.logical_key {
-                    Key::Character(c) if hot && press && (c == "c" || c == "C") => self.copy(),
-                    Key::Character(c) if hot && press && (c == "v" || c == "V") => {
-                        self.paste(false)
+                    Key::Character(c) if hot && (c == "c" || c == "C") => {
+                        if press {
+                            self.copy()
+                        }
+                    }
+                    Key::Character(c) if hot && (c == "v" || c == "V") => {
+                        if press {
+                            self.paste(false)
+                        }
                     }
                     _ => {
                         let bytes = Shell::key(
                             event.state,
-                            event.repeat,
                             &event.logical_key,
                             event.text.as_deref(),
                             self.mods.control_key(),
@@ -205,6 +237,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
+            }
+            WindowEvent::Focused(inside) => {
+                if self.grid.focused() {
+                    self.grid.focus(inside);
+                    self.flush();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.at = (position.x as f32, position.y as f32);
@@ -284,11 +322,31 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _loop_: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, loop_: &ActiveEventLoop) {
         if self.feed() {
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
+        }
+        if self.grid.blinked() {
+            let now = std::time::Instant::now();
+            match self.next {
+                Some(due) if now < due => {
+                    loop_.set_control_flow(ControlFlow::WaitUntil(due));
+                }
+                _ => {
+                    self.grid.flip();
+                    self.show();
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                    let due = now + std::time::Duration::from_millis(530);
+                    self.next = Some(due);
+                    loop_.set_control_flow(ControlFlow::WaitUntil(due));
+                }
+            }
+        } else if self.next.take().is_some() {
+            loop_.set_control_flow(ControlFlow::Wait);
         }
     }
 }

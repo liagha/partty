@@ -1,6 +1,6 @@
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use wgpu::{Device, MultisampleState, Queue, RenderPass, TextureFormat};
 
@@ -8,10 +8,8 @@ use crate::color::FORE;
 use crate::grid::Span;
 
 const DEMO: &str = "سلام دنیا!\nمی‌خواهم یک ترمینال فارسی بسازم\nاعداد فارسی: ۰۱۲۳۴۵۶۷۸۹\npartty نسخه ۰.۱ — hello سلام 123\nلا لام‌الف، کتاب‌ها، تهران\nاین یک پاراگراف طولانی فارسی است برای آزمایش شکستن خط و چیدمان راست‌به‌چپ در پنجره با عرض‌های مختلف\nThe quick brown fox jumps over ۱۲۳";
-const SIZE: f32 = 30.0;
+pub(crate) const SIZE: f32 = 30.0;
 const PAD: f32 = 24.0;
-const LINE: f32 = SIZE * 1.5;
-const ADV: f32 = SIZE * 0.6;
 const FACE: &str = "DejaVu Sans Mono";
 
 #[derive(Clone, Copy)]
@@ -20,6 +18,8 @@ pub struct Geo {
     pub step: f32,
     pub pad: f32,
     pub scale: f32,
+    pub wide: f32,
+    pub high: f32,
 }
 
 pub struct Text {
@@ -31,16 +31,30 @@ pub struct Text {
     buffer: Buffer,
     _cache: Cache,
     scale: f32,
+    size: f32,
+    wide: u32,
+    high: u32,
 }
 
 impl Text {
     fn fonts() -> FontSystem {
         let mut db = glyphon::fontdb::Database::new();
         db.load_font_data(include_bytes!("../assets/Vazirmatn-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../assets/Vazirmatn-Bold.ttf").to_vec());
         db.load_font_data(include_bytes!("../assets/DejaVuSansMono.ttf").to_vec());
+        db.load_font_data(include_bytes!("../assets/DejaVuSansMono-Bold.ttf").to_vec());
+        for path in Self::EXTRA {
+            let _ = db.load_font_file(path);
+        }
         let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
         FontSystem::new_with_locale_and_db(locale, db)
     }
+
+    const EXTRA: &[&str] = &[
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    ];
 
     fn layout(width: u32, height: u32, scale: f32) -> (f32, f32, TextBounds) {
         let pad = (PAD * scale).round();
@@ -55,24 +69,24 @@ impl Text {
         (inner_w / scale, inner_h / scale, bounds)
     }
 
-    pub fn cells(width: u32, height: u32, scale: f32) -> (usize, usize) {
+    pub fn cells(width: u32, height: u32, scale: f32, size: f32) -> (usize, usize) {
         let (inner_w, inner_h, _) = Self::layout(width, height, scale);
-        let rows = (inner_h / LINE).floor().max(1.0) as usize;
-        let cols = (inner_w / ADV).floor().max(1.0) as usize;
+        let rows = (inner_h / (size * 1.5)).floor().max(1.0) as usize;
+        let cols = (inner_w / (size * 0.6)).floor().max(1.0) as usize;
         (rows, cols)
     }
 
-    pub fn advance(width: u32, height: u32, scale: f32) -> f32 {
+    pub fn advance(width: u32, height: u32, scale: f32, size: f32) -> f32 {
         let (_, inner_h, _) = Self::layout(width, height, scale);
-        let (rows, _) = Self::cells(width, height, scale);
+        let (rows, _) = Self::cells(width, height, scale, size);
         inner_h / rows.max(1) as f32
     }
 
     fn fit(&mut self, width: u32, height: u32) {
         let (inner_w, inner_h, _) = Self::layout(width, height, self.scale);
         self.buffer.set_metrics(Metrics {
-            font_size: SIZE,
-            line_height: Self::advance(width, height, self.scale),
+            font_size: self.size,
+            line_height: Self::advance(width, height, self.scale, self.size),
         });
         self.buffer.set_size(Some(inner_w), Some(inner_h));
         self.buffer.shape_until_scroll(&mut self.font, false);
@@ -85,6 +99,7 @@ impl Text {
         width: u32,
         height: u32,
         scale: f32,
+        size: f32,
     ) -> Self {
         let mut font = Self::fonts();
         let swash = SwashCache::new();
@@ -92,7 +107,7 @@ impl Text {
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
         let renderer = TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
         let viewport = Viewport::new(device, &cache);
-        let mut buffer = Buffer::new(&mut font, Metrics::relative(SIZE, 1.5));
+        let mut buffer = Buffer::new(&mut font, Metrics::relative(size, 1.5));
         buffer.set_wrap(Wrap::None);
         let mut text = Self {
             font,
@@ -103,6 +118,9 @@ impl Text {
             buffer,
             _cache: cache,
             scale,
+            size,
+            wide: width.max(1),
+            high: height.max(1),
         };
         text.fit(width, height);
         let demo: Vec<Vec<Span>> = DEMO
@@ -114,6 +132,7 @@ impl Text {
                     text: line.to_string(),
                     under: false,
                     strike: false,
+                    bold: false,
                     col: 0,
                 }]
             })
@@ -144,6 +163,11 @@ impl Text {
                     Attrs {
                         family: Family::Name(FACE),
                         color_opt: Some(span.hue),
+                        weight: if span.bold {
+                            Weight::BOLD
+                        } else {
+                            Weight::NORMAL
+                        },
                         ..Attrs::new()
                     },
                 ));
@@ -160,17 +184,21 @@ impl Text {
                 (xs.len() >= 2).then(|| (xs[1] - xs[0]).abs())
             })
             .next()
-            .unwrap_or(ADV);
+            .unwrap_or(self.size * 0.6);
         Geo {
             adv,
             step: self.buffer.metrics().line_height,
             pad: PAD * self.scale,
             scale: self.scale,
+            wide: self.wide as f32,
+            high: self.high as f32,
         }
     }
 
     pub fn resize(&mut self, queue: &Queue, width: u32, height: u32, scale: f32) {
         self.scale = scale;
+        self.wide = width.max(1);
+        self.high = height.max(1);
         self.viewport.update(
             queue,
             Resolution {
@@ -260,14 +288,30 @@ mod test {
     }
 
     #[test]
+    fn emoji_resolves() {
+        let font = super::Text::fonts();
+        let found = font.db().query(&fontdb::Query {
+            families: &[fontdb::Family::Name("Noto Color Emoji")],
+            ..Default::default()
+        });
+        assert_eq!(found.is_some(), std::path::Path::new(super::Text::EXTRA[0]).exists());
+    }
+
+    #[test]
     fn cells_fit() {
-        assert_eq!(Text::cells(1920, 1057, 1.0), (22, 104));
+        assert_eq!(Text::cells(1920, 1057, 1.0, SIZE), (22, 104));
+    }
+
+    #[test]
+    fn smaller_font_fits_more() {
+        let (rows, cols) = Text::cells(1920, 1057, 1.0, 20.0);
+        assert_eq!((rows, cols), (33, 156));
     }
 
     #[test]
     fn advance_fills() {
-        let (rows, _) = Text::cells(1920, 1057, 1.0);
+        let (rows, _) = Text::cells(1920, 1057, 1.0, SIZE);
         let box_h = 1057.0 - 2.0 * PAD;
-        assert!((Text::advance(1920, 1057, 1.0) * rows as f32 - box_h).abs() < 0.01);
+        assert!((Text::advance(1920, 1057, 1.0, SIZE) * rows as f32 - box_h).abs() < 0.01);
     }
 }

@@ -34,7 +34,7 @@ impl View {
         .ok()
     }
 
-    pub fn open(window: Arc<Window>, loop_: &ActiveEventLoop, bg: [f64; 3]) -> Self {
+    pub fn open(window: Arc<Window>, loop_: &ActiveEventLoop, bg: [f64; 3], font: f32) -> Self {
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let mut kind = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
@@ -81,6 +81,7 @@ impl View {
             size.width.max(1),
             size.height.max(1),
             scale,
+            font,
         );
         let fill = Fill::open(&device, config.format);
         Self {

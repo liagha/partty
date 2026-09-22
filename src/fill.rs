@@ -38,8 +38,17 @@ pub struct Rect {
 
 pub fn rects(lines: &[Vec<Span>], geo: &Geo) -> Vec<Rect> {
     let mut out = Vec::new();
+    let bottom = lines.len().saturating_sub(1);
     for (r, line) in lines.iter().enumerate() {
-        for span in line {
+        let mut first = usize::MAX;
+        let mut last = 0;
+        for (i, span) in line.iter().enumerate() {
+            if span.back.is_some() && !span.text.is_empty() {
+                first = first.min(i);
+                last = last.max(i);
+            }
+        }
+        for (i, span) in line.iter().enumerate() {
             let cols = span.text.chars().count() as f32;
             if cols <= 0.0 {
                 continue;
@@ -48,13 +57,28 @@ pub fn rects(lines: &[Vec<Span>], geo: &Geo) -> Vec<Rect> {
             let w = cols * geo.adv * geo.scale;
             let top = geo.pad + r as f32 * geo.step * geo.scale;
             if let Some(back) = span.back {
-                out.push(Rect {
+                let mut edge = Rect {
                     x,
                     y: top,
                     w,
                     h: geo.step * geo.scale,
                     rgb: flat(back),
-                });
+                };
+                if i == first {
+                    edge.w += edge.x;
+                    edge.x = 0.0;
+                }
+                if i == last {
+                    edge.w = geo.wide - edge.x;
+                }
+                if r == 0 {
+                    edge.h += edge.y;
+                    edge.y = 0.0;
+                }
+                if r == bottom {
+                    edge.h = geo.high - edge.y;
+                }
+                out.push(edge);
             }
             let bar = geo.scale.max(1.0);
             if span.under {
@@ -234,28 +258,59 @@ mod test {
             step: 20.0,
             pad: 5.0,
             scale: 2.0,
+            wide: 200.0,
+            high: 100.0,
         };
-        let lines = vec![vec![
-            Span {
-                hue: Color::rgb(255, 255, 255),
-                back: None,
-                text: "ab".into(),
-                under: false,
-                strike: false,
-                col: 0,
-            },
-            Span {
-                hue: Color::rgb(255, 255, 255),
-                back: Some(Color::rgb(255, 0, 0)),
-                text: "hi".into(),
-                under: false,
-                strike: false,
-                col: 2,
-            },
-        ]];
+        let paint = |text: &str, col: usize| Span {
+            hue: Color::rgb(255, 255, 255),
+            back: Some(Color::rgb(255, 0, 0)),
+            text: text.into(),
+            under: false,
+            strike: false,
+            bold: false,
+            col,
+        };
+        let lines = vec![
+            vec![paint("ab", 0)],
+            vec![paint("hi", 2)],
+            vec![paint("yo", 4)],
+        ];
         let out = rects(&lines, &geo);
-        assert_eq!(out.len(), 1);
-        assert_eq!((out[0].x, out[0].y, out[0].w, out[0].h), (45.0, 5.0, 40.0, 40.0));
+        assert_eq!(out.len(), 3);
+        assert_eq!((out[0].x, out[0].y, out[0].w, out[0].h), (0.0, 0.0, 200.0, 45.0));
+        assert_eq!((out[1].x, out[1].y, out[1].w, out[1].h), (0.0, 45.0, 200.0, 40.0));
+        assert_eq!((out[2].x, out[2].y, out[2].w, out[2].h), (0.0, 85.0, 200.0, 15.0));
         assert_eq!(out[0].rgb, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn middle_keeps_edges() {
+        let geo = Geo {
+            adv: 10.0,
+            step: 20.0,
+            pad: 5.0,
+            scale: 2.0,
+            wide: 200.0,
+            high: 100.0,
+        };
+        let paint = |text: &str, col: usize| Span {
+            hue: Color::rgb(255, 255, 255),
+            back: Some(Color::rgb(0, 255, 0)),
+            text: text.into(),
+            under: false,
+            strike: false,
+            bold: false,
+            col,
+        };
+        let lines = vec![
+            vec![paint("a", 0)],
+            vec![paint("b", 0), paint("c", 2), paint("d", 4)],
+            vec![paint("e", 0)],
+        ];
+        let out = rects(&lines, &geo);
+        assert_eq!(out.len(), 5);
+        assert_eq!((out[1].x, out[1].w), (0.0, 25.0));
+        assert_eq!((out[2].x, out[2].w), (45.0, 20.0));
+        assert_eq!((out[3].x, out[3].w), (85.0, 115.0));
     }
 }
