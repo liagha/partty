@@ -1,0 +1,108 @@
+use serde::Deserialize;
+
+use crate::color::{self, Colors, Palette};
+
+#[derive(Deserialize, Default)]
+struct File {
+    background: Option<String>,
+    foreground: Option<String>,
+    past_bottom: Option<usize>,
+    colors: Option<Colors>,
+}
+
+pub struct Config {
+    pub bg: [f64; 3],
+    pub below: Option<usize>,
+    pub inks: Palette,
+}
+
+impl Config {
+    const FALLBACK: &str = "#1e1e1e";
+
+    pub fn load() -> Self {
+        let text = std::fs::read_to_string("config.toml").unwrap_or_default();
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Self {
+        let file: File = toml::from_str(text).unwrap_or_default();
+        let back = file
+            .background
+            .as_deref()
+            .and_then(color::hex)
+            .unwrap_or_else(|| color::hex(Self::FALLBACK).unwrap_or(color::BACK));
+        let fore = file
+            .foreground
+            .as_deref()
+            .and_then(color::hex)
+            .unwrap_or(color::FORE);
+        let mut inks = Palette::default();
+        inks.back = back;
+        inks.fore = fore;
+        if let Some(over) = &file.colors {
+            inks.load(over);
+        }
+        Self {
+            bg: Self::linear(back),
+            below: file.past_bottom,
+            inks,
+        }
+    }
+
+    fn linear(rgb: [u8; 3]) -> [f64; 3] {
+        let to = |byte: u8| {
+            let v = byte as f64 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        [to(rgb[0]), to(rgb[1]), to(rgb[2])]
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn close(a: [f64; 3], b: [f64; 3]) -> bool {
+        a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| (x - y).abs() < 0.002)
+    }
+
+    #[test]
+    fn parse_full() {
+        let config = Config::parse("background = \"#000000\"\npast_bottom = 5\n");
+        assert!(close(config.bg, [0.0, 0.0, 0.0]));
+        assert_eq!(config.below, Some(5));
+    }
+
+    #[test]
+    fn parse_empty() {
+        let config = Config::parse("");
+        assert!(close(
+            config.bg,
+            Config::linear(color::hex(Config::FALLBACK).unwrap())
+        ));
+        assert_eq!(config.below, None);
+    }
+
+    #[test]
+    fn parse_broken() {
+        let broken = Config::parse("[[[");
+        let empty = Config::parse("");
+        assert!(close(broken.bg, empty.bg));
+        assert_eq!(broken.below, None);
+        let bad = Config::parse("background = \"nope\"\n");
+        assert!(close(bad.bg, empty.bg));
+    }
+
+    #[test]
+    fn parse_colors() {
+        let config = Config::parse("foreground = \"#ffffff\"\n[colors]\nred = \"#ff0000\"\n");
+        assert_eq!(config.inks.fore, [255, 255, 255]);
+        assert_eq!(config.inks.slots[1], [255, 0, 0]);
+    }
+}

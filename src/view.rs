@@ -6,6 +6,7 @@ use wgpu::{
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::grid::Span;
 use crate::text::Text;
 
 pub struct View {
@@ -16,6 +17,7 @@ pub struct View {
     config: SurfaceConfiguration,
     text: Text,
     window: Arc<Window>,
+    bg: wgpu::Color,
 }
 
 impl View {
@@ -29,7 +31,7 @@ impl View {
         .ok()
     }
 
-    pub fn open(window: Arc<Window>, loop_: &ActiveEventLoop) -> Self {
+    pub fn open(window: Arc<Window>, loop_: &ActiveEventLoop, bg: [f64; 3]) -> Self {
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let mut kind = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
@@ -85,6 +87,12 @@ impl View {
             config,
             text,
             window,
+            bg: wgpu::Color {
+                r: bg[0],
+                g: bg[1],
+                b: bg[2],
+                a: 1.0,
+            },
         }
     }
 
@@ -92,6 +100,10 @@ impl View {
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
         self.text.resize(&self.queue, width.max(1), height.max(1), scale);
+    }
+
+    pub fn show(&mut self, lines: &[Vec<Span>]) {
+        self.text.show(lines);
     }
 
     pub fn draw(&mut self) {
@@ -123,12 +135,7 @@ impl View {
                     view: &target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.07,
-                            b: 0.09,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.bg),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
