@@ -1,0 +1,11 @@
+[package]
+name = "partty"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glyphon = "0.12"
+pollster = "0.4"
+portable-pty = "0.8"
+wgpu = "30"
+winit = "0.30"

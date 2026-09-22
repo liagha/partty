@@ -1,0 +1,147 @@
+use std::sync::Arc;
+use wgpu::{
+    Adapter, CompositeAlphaMode, Device, PresentMode, Queue, Surface, SurfaceColorSpace,
+    SurfaceConfiguration, TextureFormat, TextureUsages,
+};
+use winit::event_loop::ActiveEventLoop;
+use winit::window::Window;
+
+use crate::text::Text;
+
+pub struct View {
+    instance: wgpu::Instance,
+    surface: Surface<'static>,
+    device: Device,
+    queue: Queue,
+    config: SurfaceConfiguration,
+    text: Text,
+    window: Arc<Window>,
+}
+
+impl View {
+    fn adapter(instance: &wgpu::Instance, surface: &Surface) -> Option<Adapter> {
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()
+    }
+
+    pub fn open(window: Arc<Window>, loop_: &ActiveEventLoop) -> Self {
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let mut kind = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+            loop_.owned_display_handle(),
+        ));
+        kind.backends = wgpu::Backends::GL.with_env();
+        let mut instance = wgpu::Instance::new(kind);
+        let mut surface = instance.create_surface(window.clone()).unwrap();
+        let mut adapter = Self::adapter(&instance, &surface);
+        if adapter.is_none() {
+            eprintln!("partty: gl unavailable, trying all backends");
+            instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            surface = instance.create_surface(window.clone()).unwrap();
+            adapter = Self::adapter(&instance, &surface);
+        }
+        let adapter = adapter.unwrap();
+        let info = adapter.get_info();
+        eprintln!("partty: {} ({:?})", info.name, info.backend);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: Default::default(),
+            trace: Default::default(),
+        }))
+        .unwrap();
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: TextureFormat::Bgra8UnormSrgb,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: PresentMode::AutoVsync,
+            alpha_mode: CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: SurfaceColorSpace::Auto,
+        };
+        surface.configure(&device, &config);
+        let text = Text::open(
+            &device,
+            &queue,
+            config.format,
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+        );
+        Self {
+            instance,
+            surface,
+            device,
+            queue,
+            config,
+            text,
+            window,
+        }
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32, scale: f32) {        self.config.width = width.max(1);
+        self.config.height = height.max(1);
+        self.surface.configure(&self.device, &self.config);
+        self.text.resize(&self.queue, width.max(1), height.max(1), scale);
+    }
+
+    pub fn draw(&mut self) {
+        let (width, height) = (self.config.width, self.config.height);
+        self.text.prepare(&self.device, &self.queue, width, height);
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self.instance.create_surface(self.window.clone()).unwrap();
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => panic!("validation error"),
+        };
+        let target = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: None,
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.07,
+                            g: 0.07,
+                            b: 0.09,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.text.render(&mut pass);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+        self.text.trim();
+    }
+}
