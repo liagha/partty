@@ -8,7 +8,8 @@ A GPU terminal emulator with proper Persian and RTL text.
 - Truecolor, 256 colors, and 16-color palette
 - Scrollback with mouse wheel scrolling
 - Alt-screen apps (vim, less, htop, btop)
-- Mouse reporting, selection, and clipboard
+- Mouse reporting and clipboard
+- Kitty, Sixel, and iTerm images
 - Blinking block, bar, and underline cursor
 - Runs on Linux, macOS, and Windows
 

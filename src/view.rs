@@ -7,7 +7,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
 use crate::fill::Fill;
-use crate::grid::Span;
+use crate::grid::{Pic, Span};
+use crate::pics::Pics;
 use crate::text::{Geo, Text};
 
 pub struct View {
@@ -18,6 +19,7 @@ pub struct View {
     config: SurfaceConfiguration,
     text: Text,
     fill: Fill,
+    pics: Pics,
     window: Arc<Window>,
     bg: wgpu::Color,
     geo: Option<Geo>,
@@ -93,6 +95,7 @@ impl View {
             files,
         );
         let fill = Fill::open(&device, config.format);
+        let pics = Pics::open(&device, config.format);
         Self {
             instance,
             surface,
@@ -101,6 +104,7 @@ impl View {
             config,
             text,
             fill,
+            pics,
             window,
             bg: wgpu::Color {
                 r: bg[0],
@@ -118,22 +122,47 @@ impl View {
         self.text.resize(&self.queue, width.max(1), height.max(1), scale);
     }
 
-    pub fn show(&mut self, lines: &[Vec<Span>]) {
+    pub fn show(&mut self, lines: &[Vec<Span>]) -> Geo {
         let geo = self.text.show(lines);
         self.geo = Some(geo);
         let boxes = crate::fill::rects(lines, &geo);
         self.fill
             .paint(&self.queue, &boxes, self.config.width, self.config.height);
+        geo
     }
 
-    pub fn cell(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+    pub fn pics<'a>(
+        &mut self,
+        pics: &[Pic],
+        get: &'a dyn Fn(u32) -> Option<(u32, u32, &'a [u8])>,
+    ) {
+        let Some(geo) = self.geo else {
+            return;
+        };
+        for p in pics {
+            if !self.pics.has(p.id) {
+                if let Some((w, h, bytes)) = get(p.id) {
+                    self.pics.upload(&self.device, &self.queue, p.id, w, h, bytes);
+                }
+            }
+        }
+        let draws = crate::pics::rects(pics, &|id| get(id).map(|(w, h, _)| (w, h)), &geo);
+        self.pics.paint(&self.queue, &draws, self.config.width, self.config.height);
+    }
+
+    pub fn spot(&self, x: f32, y: f32) -> Option<(usize, usize)> {
         let geo = self.geo?;
-        if geo.adv <= 0.0 || geo.step <= 0.0 {
+        let adv = geo.adv * geo.scale;
+        let step = geo.step * geo.scale;
+        if adv <= 0.0 || step <= 0.0 {
             return None;
         }
-        let col = ((x - geo.pad) / geo.adv).floor() as i32;
-        let row = ((y - geo.pad) / geo.step).floor() as i32;
-        (row >= 0 && col >= 0).then(|| (row as usize, col as usize))
+        let across = (x - geo.pad) / adv;
+        let down = (y - geo.pad) / step;
+        if across < -1.0 || down < -1.0 {
+            return None;
+        }
+        Some((down.floor().max(0.0) as usize, across.floor().max(0.0) as usize))
     }
 
     pub fn draw(&mut self) {
@@ -176,6 +205,7 @@ impl View {
                 multiview_mask: None,
             });
             self.fill.draw(&mut pass);
+            self.pics.draw(&mut pass);
             self.text.render(&mut pass);
         }
         self.queue.submit([encoder.finish()]);

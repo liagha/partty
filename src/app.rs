@@ -24,9 +24,7 @@ pub struct App {
     mods: ModifiersState,
     at: (f32, f32),
     drag: bool,
-    anchor: Option<(usize, usize)>,
     held: u8,
-    roll: f32,
     font: f32,
     next: Option<std::time::Instant>,
 }
@@ -55,7 +53,11 @@ impl App {
             match self.inbox.as_ref().map(|inbox| inbox.try_recv()) {
                 Some(Ok(bytes)) => {
                     let was = self.grid.cursor();
-                    self.parse.advance(&mut self.grid, &bytes);
+                    let (clean, payloads) = self.grid.split(&bytes);
+                    for p in &payloads {
+                        self.grid.apc(p);
+                    }
+                    self.parse.advance(&mut self.grid, &clean);
                     self.grid.moved(was);
                     self.grid.lit();
                     self.flush();
@@ -81,19 +83,11 @@ impl App {
         }
         let styled = self.grid.spans();
         if let Some(view) = self.view.as_mut() {
-            view.show(&styled);
+            let geo = view.show(&styled);
+            self.grid.set_px(geo.adv, geo.step);
+            let pics = self.grid.pics();
+            view.pics(&pics, &|id| self.grid.entry(id));
         }
-    }
-
-    fn pick(&self) -> Option<(usize, usize)> {
-        let view = self.view.as_ref()?;
-        let (row, col) = view.cell(self.at.0, self.at.1)?;
-        self.grid.at(row, col)
-    }
-
-    fn spot(&self) -> Option<(usize, usize)> {
-        let view = self.view.as_ref()?;
-        view.cell(self.at.0, self.at.1)
     }
 
     fn press(&mut self, button: MouseButton, state: ElementState) {
@@ -119,10 +113,9 @@ impl App {
         }
     }
 
-    fn copy(&self) {
-        if self.grid.marked() {
-            Clip::copy(&self.grid.selected());
-        }
+    fn spot(&self) -> Option<(usize, usize)> {
+        let view = self.view.as_ref()?;
+        view.spot(self.at.0, self.at.1)
     }
 
     fn paste(&mut self, primary: bool) {
@@ -216,11 +209,6 @@ impl ApplicationHandler for App {
                 let hot = self.mods.control_key() && self.mods.shift_key();
                 let press = event.state == ElementState::Pressed && !event.repeat;
                 match &event.logical_key {
-                    Key::Character(c) if hot && (c == "c" || c == "C") => {
-                        if press {
-                            self.copy()
-                        }
-                    }
                     Key::Character(c) if hot && (c == "v" || c == "V") => {
                         if press {
                             self.paste(false)
@@ -246,6 +234,9 @@ impl ApplicationHandler for App {
                 self.mods = mods.state();
             }
             WindowEvent::Focused(inside) => {
+                if !inside {
+                    self.drag = false;
+                }
                 if self.grid.focused() {
                     self.grid.focus(inside);
                     self.flush();
@@ -253,55 +244,28 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.at = (position.x as f32, position.y as f32);
-                if self.grid.mouse() {
-                    if self.drag && self.grid.motion() {
-                        if let Some((row, col)) = self.spot() {
-                            self.grid.click(self.held, row, col, true);
-                        }
-                    }
-                } else if self.drag {
-                    if let (Some(from), Some(to)) = (self.anchor, self.pick()) {
-                        self.grid.select(from, to);
-                        self.show();
-                        window.request_redraw();
+                if !self.grid.mouse() {
+                    return;
+                }
+                if self.drag && self.grid.motion() {
+                    if let Some((row, col)) = self.spot() {
+                        self.grid.click(self.held, row, col, true);
                     }
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 if self.grid.mouse() {
                     self.press(button, state);
-                } else {
-                    match (button, state) {
-                        (MouseButton::Left, ElementState::Pressed) => {
-                            self.anchor = self.pick();
-                            self.drag = self.anchor.is_some();
-                            match self.anchor {
-                                Some(cell) => self.grid.select(cell, cell),
-                                None => self.grid.unmark(),
-                            }
-                            self.show();
-                            window.request_redraw();
-                        }
-                        (MouseButton::Left, ElementState::Released) => {
-                            self.drag = false;
-                            self.copy();
-                        }
-                        (MouseButton::Middle, ElementState::Pressed) => self.paste(true),
-                        _ => {}
-                    }
+                } else if let (MouseButton::Middle, ElementState::Pressed) = (button, state) {
+                    self.paste(true);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as f32,
+                };
                 if self.grid.mouse() {
-                    let lines = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(pos) => {
-                            self.roll += pos.y as f32 / 20.0;
-                            let n = self.roll.trunc();
-                            self.roll -= n;
-                            n
-                        }
-                    };
                     let n = lines.trunc() as i32;
                     if n != 0 {
                         if let Some((row, col)) = self.spot() {
@@ -311,10 +275,6 @@ impl ApplicationHandler for App {
                         }
                     }
                 } else {
-                    let lines = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as f32,
-                    };
                     self.grid.wheel(lines);
                     self.show();
                     window.request_redraw();

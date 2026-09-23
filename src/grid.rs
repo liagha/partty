@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use vte::{Params, Perform};
 
+use base64::prelude::*;
 use crate::color::{Color, Palette};
+use crate::image::{self, Ctl, Cut, Six, Store};
 
 const PAST: usize = 1000;
 
@@ -67,6 +69,26 @@ pub struct Span {
     pub col: usize,
 }
 
+pub struct Place {
+    id: u32,
+    row: i32,
+    col: usize,
+    rows: u32,
+    cols: u32,
+    want_c: u32,
+    want_r: u32,
+    z: i32,
+}
+
+pub struct Pic {
+    pub id: u32,
+    pub row: i32,
+    pub col: usize,
+    pub rows: u32,
+    pub cols: u32,
+    pub z: i32,
+}
+
 pub struct Grid {
     cells: Vec<Vec<Cell>>,
     alt: Vec<Vec<Cell>>,
@@ -87,7 +109,6 @@ pub struct Grid {
     row: usize,
     col: usize,
     reply: Vec<u8>,
-    mark: Option<((usize, usize), (usize, usize))>,
     press: bool,
     cell: bool,
     ext: bool,
@@ -97,6 +118,13 @@ pub struct Grid {
     blink: bool,
     phase: bool,
     title: Option<String>,
+    cut: Cut,
+    store: Store,
+    places: Vec<Place>,
+    six: Option<Six>,
+    parts: Option<(Ctl, Vec<u8>)>,
+    ids: u32,
+    px: (f32, f32),
 }
 
 impl Grid {
@@ -121,7 +149,6 @@ impl Grid {
             row: 0,
             col: 0,
             reply: Vec::new(),
-            mark: None,
             press: false,
             cell: false,
             ext: false,
@@ -131,6 +158,13 @@ impl Grid {
             blink: false,
             phase: true,
             title: None,
+            cut: Cut::new(),
+            store: Store::new(),
+            places: Vec::new(),
+            six: None,
+            parts: None,
+            ids: u32::MAX,
+            px: (8.0, 16.0),
         };
         grid.resize(rows, cols);
         grid
@@ -212,6 +246,153 @@ impl Grid {
         self.answer(if inside { "\x1b[I" } else { "\x1b[O" });
     }
 
+    pub fn set_px(&mut self, w: f32, h: f32) {
+        self.px = (w, h);
+        for p in &mut self.places {
+            if let Some(e) = self.store.get(p.id) {
+                let (cols, rows) = image::cells_for(e.w, e.h, w, h, p.want_c, p.want_r);
+                p.cols = cols;
+                p.rows = rows;
+            }
+        }
+    }
+
+    pub fn entry(&self, id: u32) -> Option<(u32, u32, &[u8])> {
+        self.store.get(id).map(|e| (e.w, e.h, e.rgba.as_slice()))
+    }
+
+    pub fn pics(&self) -> Vec<Pic> {
+        let mut out = Vec::new();
+        for p in &self.places {
+            if self.store.get(p.id).is_none() {
+                continue;
+            }
+            out.push(Pic {
+                id: p.id,
+                row: p.row + self.off,
+                col: p.col,
+                rows: p.rows,
+                cols: p.cols,
+                z: p.z,
+            });
+        }
+        out.sort_by_key(|p| p.z);
+        out
+    }
+
+    pub fn split(&mut self, bytes: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        self.cut.split(bytes)
+    }
+
+    pub fn apc(&mut self, payload: &[u8]) {
+        let Some((ctl, data)) = image::kitty(payload) else {
+            return;
+        };
+        if ctl.more {
+            match self.parts.as_mut() {
+                Some((_, buf)) => buf.extend_from_slice(&data),
+                None => self.parts = Some((ctl, data)),
+            }
+            return;
+        }
+        let (ctl, data) = match self.parts.take() {
+            Some((first, mut buf)) => {
+                buf.extend_from_slice(&data);
+                (first, buf)
+            }
+            None => (ctl, data),
+        };
+        match ctl.act {
+            b'T' => self.send(ctl, &data),
+            b'p' => self.play(ctl),
+            b'd' | b'D' => self.drop_image(ctl),
+            b'q' => self.probe(ctl, &data),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self, ctl: Ctl, data: &[u8]) {
+        let Ok(raw) = BASE64_STANDARD.decode(data) else {
+            return;
+        };
+        let Some(entry) = image::decode(ctl.fmt, ctl.img_w, ctl.img_h, &raw) else {
+            return;
+        };
+        if ctl.id == 0 {
+            let id = self.ids;
+            self.ids = self.ids.wrapping_sub(1);
+            if let Some(old) = self.store.put(id, entry) {
+                self.places.retain(|p| p.id != old);
+            }
+            self.place(id, ctl);
+        } else {
+            let id = ctl.id;
+            if let Some(old) = self.store.put(id, entry) {
+                self.places.retain(|p| p.id != old);
+            }
+            self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+            self.place(id, ctl);
+        }
+    }
+
+    fn play(&mut self, ctl: Ctl) {
+        if self.store.get(ctl.id).is_none() {
+            self.answer(&format!("\x1b_Gi={};ENOENT\x1b\\", ctl.id));
+            return;
+        }
+        let id = ctl.id;
+        self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+        self.place(id, ctl);
+    }
+
+    fn drop_image(&mut self, ctl: Ctl) {
+        if ctl.id == 0 {
+            self.places.clear();
+        } else {
+            self.places.retain(|p| p.id != ctl.id);
+        }
+        if ctl.act == b'D' {
+            if ctl.id == 0 {
+                self.store.clear();
+            } else {
+                self.store.free(ctl.id);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn probe(&mut self, ctl: Ctl, data: &[u8]) {
+        let Ok(raw) = BASE64_STANDARD.decode(data) else {
+            return;
+        };
+        if image::decode(ctl.fmt, ctl.img_w, ctl.img_h, &raw).is_some() {
+            self.answer(&format!("\x1b_Gi={};OK\x1b\\", ctl.id));
+        }
+    }
+
+    fn place(&mut self, id: u32, ctl: Ctl) {
+        let (w, h) = match self.store.get(id) {
+            Some(e) => (e.w, e.h),
+            None => return,
+        };
+        let (cols, rows) = image::cells_for(w, h, self.px.0, self.px.1, ctl.cols, ctl.rows);
+        self.places.push(Place {
+            id,
+            row: self.row as i32,
+            col: self.col,
+            rows,
+            cols,
+            want_c: ctl.cols,
+            want_r: ctl.rows,
+            z: ctl.z,
+        });
+        if !ctl.still {
+            self.col = (self.col + cols as usize).min(self.cols.saturating_sub(1));
+            self.row = (self.row + rows as usize).min(self.bot);
+        }
+        self.dirty = true;
+    }
+
     fn answer(&mut self, text: &str) {
         self.reply.extend_from_slice(text.as_bytes());
     }
@@ -238,7 +419,9 @@ impl Grid {
         self.top = 0;
         self.bot = rows.saturating_sub(1);
         self.dirty = true;
-        self.mark = None;
+        self.places.clear();
+        self.six = None;
+        self.parts = None;
         self.off = self
             .off
             .clamp(-(self.below as i32), self.past.len() as i32);
@@ -271,7 +454,9 @@ impl Grid {
         }
         self.live = true;
         self.dirty = true;
-        self.mark = None;
+        self.places.clear();
+        self.six = None;
+        self.parts = None;
     }
 
     fn exit(&mut self) {
@@ -285,7 +470,9 @@ impl Grid {
         self.bot = self.rows.saturating_sub(1);
         self.off = 0;
         self.dirty = true;
-        self.mark = None;
+        self.places.clear();
+        self.six = None;
+        self.parts = None;
     }
 
     pub fn take_dirty(&mut self) -> bool {
@@ -307,67 +494,6 @@ impl Grid {
         } else {
             &self.cells[i - base]
         }
-    }
-
-    pub fn at(&self, vrow: usize, vcol: usize) -> Option<(usize, usize)> {
-        if self.cols == 0 {
-            return None;
-        }
-        let (start, stop) = self.window();
-        (vrow < stop.saturating_sub(start))
-            .then(|| (start + vrow, vcol.min(self.cols - 1)))
-    }
-
-    pub fn select(&mut self, from: (usize, usize), to: (usize, usize)) {
-        let mark = Some(if from <= to { (from, to) } else { (to, from) });
-        if self.mark != mark {
-            self.mark = mark;
-            self.dirty = true;
-        }
-    }
-
-    pub fn unmark(&mut self) {
-        if self.mark.take().is_some() {
-            self.dirty = true;
-        }
-    }
-
-    pub fn marked(&self) -> bool {
-        self.mark.is_some()
-    }
-
-    fn inside(&self, row: usize, col: usize) -> bool {
-        match self.mark {
-            Some((from, to)) => (row, col) >= from && (row, col) <= to,
-            None => false,
-        }
-    }
-
-    pub fn selected(&self) -> String {
-        let Some(((r1, c1), (r2, c2))) = self.mark else {
-            return String::new();
-        };
-        let base = if self.live { 0 } else { self.past.len() };
-        let total = base + self.rows;
-        let mut lines = Vec::new();
-        for i in r1..=r2.min(total.saturating_sub(1)) {
-            if i >= total {
-                break;
-            }
-            let row = self.line(i, base);
-            let from = if i == r1 { c1.min(row.len()) } else { 0 };
-            let to = if i == r2 {
-                (c2 + 1).min(row.len())
-            } else {
-                row.len()
-            };
-            let mut text: String = row[from..to].iter().map(|cell| cell.glyph).collect();
-            while text.ends_with(' ') {
-                text.pop();
-            }
-            lines.push(text);
-        }
-        lines.join("\n")
     }
 
     fn wipe(&mut self, row: usize, from: usize, to: usize) {
@@ -399,7 +525,7 @@ impl Grid {
             let fill = self.empty();
             self.cells.push(vec![fill; self.cols]);
             self.row = self.rows - 1;
-            self.mark = None;
+            self.shift(-1);
             return;
         }
         if self.top > 0 || self.bot + 1 < self.rows {
@@ -411,12 +537,6 @@ impl Grid {
         self.past.push_back(top);
         if self.past.len() > PAST {
             self.past.pop_front();
-            if let Some(((r1, c1), (r2, c2))) = self.mark {
-                self.mark = Some((
-                    (r1.saturating_sub(1), c1),
-                    (r2.saturating_sub(1), c2),
-                ));
-            }
         }
         if self.off > 0 {
             self.off = (self.off + 1).min(self.past.len() as i32);
@@ -426,6 +546,7 @@ impl Grid {
         let fill = self.empty();
         self.cells.push(vec![fill; self.cols]);
         self.row = self.rows - 1;
+        self.shift(-1);
     }
 
     fn lift(&mut self, n: usize) {
@@ -434,8 +555,8 @@ impl Grid {
             self.cells.remove(self.top);
             self.cells.insert(self.bot, vec![fill; self.cols]);
         }
+        self.shift_region(-(n as i32));
         self.dirty = true;
-        self.mark = None;
     }
 
     fn drop(&mut self, n: usize) {
@@ -444,8 +565,27 @@ impl Grid {
             self.cells.remove(self.bot);
             self.cells.insert(self.top, vec![fill; self.cols]);
         }
+        self.shift_region(n as i32);
         self.dirty = true;
-        self.mark = None;
+    }
+
+    fn shift(&mut self, n: i32) {
+        for p in &mut self.places {
+            p.row += n;
+        }
+        self.places.retain(|p| p.row + p.rows as i32 > 0);
+        if !self.places.is_empty() {
+            self.dirty = true;
+        }
+    }
+
+    fn shift_region(&mut self, n: i32) {
+        for p in &mut self.places {
+            if p.row >= self.top as i32 && p.row <= self.bot as i32 {
+                p.row += n;
+            }
+        }
+        self.places.retain(|p| p.row + p.rows as i32 > 0);
     }
 
     fn down(&mut self) -> bool {
@@ -482,7 +622,6 @@ impl Grid {
         let mut out: Vec<Vec<Span>> = (start..stop)
             .map(|i| {
                 self.runs(
-                    i,
                     self.line(i, base),
                     at.filter(|&(r, _)| r == i).map(|(_, c)| c),
                 )
@@ -498,16 +637,11 @@ impl Grid {
         out
     }
 
-    fn runs(&self, flat: usize, row: &Vec<Cell>, cur: Option<usize>) -> Vec<Span> {
+    fn runs(&self, row: &Vec<Cell>, cur: Option<usize>) -> Vec<Span> {
         let mut end = row.len();
         while end > 0 {
             let cell = &row[end - 1];
-            if cell.glyph != ' '
-                || cell.bg != self.inks.back()
-                || cell.under
-                || cell.strike
-                || self.inside(flat, end - 1)
-            {
+            if cell.glyph != ' ' || cell.bg != self.inks.back() || cell.under || cell.strike {
                 break;
             }
             end -= 1;
@@ -522,23 +656,14 @@ impl Grid {
             } else {
                 cell.glyph
             };
-            let flip = self.inside(flat, i);
-            let hue = if flip { cell.bg } else { cell.fg };
-            let plain = cell.bg == self.inks.back();
-            let back = if flip {
-                if cell.fg == self.inks.back() {
-                    None
-                } else {
-                    Some(cell.fg)
-                }
-            } else if plain {
+            let back = if cell.bg == self.inks.back() {
                 None
             } else {
                 Some(cell.bg)
             };
             match spans.last_mut() {
                 Some(span)
-                    if span.hue == hue
+                    if span.hue == cell.fg
                         && span.back == back
                         && span.under == cell.under
                         && span.strike == cell.strike
@@ -547,7 +672,7 @@ impl Grid {
                     span.text.push(glyph)
                 }
                 _ => spans.push(Span {
-                    hue,
+                    hue: cell.fg,
                     back,
                     text: glyph.to_string(),
                     under: cell.under,
@@ -701,7 +826,6 @@ impl Perform for Grid {
                     self.cells.insert(row, vec![fill; self.cols]);
                 }
                 self.dirty = true;
-                self.mark = None;
             }
             'M' => {
                 let row = self.row.clamp(self.top, self.bot);
@@ -712,7 +836,6 @@ impl Perform for Grid {
                     self.cells.insert(self.bot, vec![fill; self.cols]);
                 }
                 self.dirty = true;
-                self.mark = None;
             }
             'm' => {
                 if mid.is_empty() {
@@ -790,8 +913,81 @@ impl Perform for Grid {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell: bool) {
-        if params.len() >= 2 && (params[0] == b"0" || params[0] == b"2") {
-            self.title = Some(String::from_utf8_lossy(params[1]).into_owned());
+        if params.len() >= 2 && (params[0] == b"0" || params[0] == b"2") {            self.title = Some(String::from_utf8_lossy(params[1]).into_owned());
+        }
+        if params.len() >= 3 && params[0] == b"1337" {
+            if let Some(first) = params[1].strip_prefix(b"File=") {
+                let mut head = first.to_vec();
+                for p in &params[2..params.len() - 1] {
+                    head.push(b';');
+                    head.extend_from_slice(p);
+                }
+                let last = params[params.len() - 1];
+                let (lead, data) = match last.iter().rposition(|&b| b == b':') {
+                    Some(at) => (&last[..at], &last[at + 1..]),
+                    None => (&[][..], last),
+                };
+                if !lead.is_empty() {
+                    head.push(b';');
+                    head.extend_from_slice(lead);
+                }
+                if let Some(f) = image::file(&head, data) {
+                        if let Some(entry) = image::decode(100, 0, 0, &f.png) {
+                            let id = self.ids;
+                            self.ids = self.ids.wrapping_sub(1);
+                            let (cols, rows) = image::cells_for(
+                                entry.w, entry.h, self.px.0, self.px.1, f.cols, f.rows,
+                            );
+                            self.store.put(id, entry);
+                            self.places.push(Place {
+                                id,
+                                row: self.row as i32,
+                                col: self.col,
+                                rows,
+                                cols,
+                                want_c: f.cols,
+                                want_r: f.rows,
+                                z: 0,
+                            });
+                            self.dirty = true;
+                        }
+                    }
+            }
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _mid: &[u8], _ignore: bool, action: char) {
+        if action == 'q' {
+            self.six = Some(Six::new());
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(six) = self.six.as_mut() {
+            six.put(&[byte]);
+        }
+    }
+
+    fn unhook(&mut self) {
+        if let Some(six) = self.six.take() {
+            if let Some(entry) = six.finish() {
+                let id = self.ids;
+                self.ids = self.ids.wrapping_sub(1);
+                let (cols, rows) =
+                    image::cells_for(entry.w, entry.h, self.px.0, self.px.1, 0, 0);
+                self.store.put(id, entry);
+                self.places.push(Place {
+                    id,
+                    row: self.row as i32,
+                    col: self.col,
+                    rows,
+                    cols,
+                    want_c: 0,
+                    want_r: 0,
+                    z: 0,
+                });
+                self.dirty = true;
+            }
         }
     }
 }
@@ -932,6 +1128,27 @@ mod test {
         (rgb[0], rgb[1], rgb[2])
     }
 
+    #[test]
+    fn rev_reset_forms() {
+        for reset in ["\x1b[m", "\x1b[0m", "\x1b[27m", "\x1b[22;27m"] {
+            let rows = tinted(&[&format!("X\x1b[7mR{reset}Y")]);
+            assert_eq!(rows.len(), 1, "form {reset:?}");
+            let spans = &rows[0];
+            assert_eq!(spans.len(), 3, "form {reset:?} -> {spans:?}");
+            assert_eq!(spans[0].0, "X");
+            assert_eq!(spans[1].0, "R");
+            assert_eq!(spans[2].0, "Y");
+            assert_eq!(spans[0].1, spans[2].1, "form {reset:?}");
+            assert_ne!(spans[0].1, spans[1].1, "form {reset:?}");
+        }
+        let cyan = tinted(&["X\x1b[7mR\x1b[0;36mY"]);
+        assert_eq!(cyan[0].len(), 3);
+        assert_eq!(cyan[0][2].1, rgb(6));
+        let stuck = tinted(&["X\x1b[7mRY"]);
+        assert_eq!(stuck[0].len(), 2);
+        assert_ne!(stuck[0][0].1, stuck[0][1].1);
+    }
+
     fn asked(chunks: &[&str]) -> Vec<u8> {
         let mut grid = Grid::new(4, 10, 4, Palette::default());
         let mut parse = vte::Parser::new();
@@ -939,12 +1156,6 @@ mod test {
             parse.advance(&mut grid, chunk.as_bytes());
         }
         grid.take_reply()
-    }
-
-    fn marked_grid() -> Grid {
-        let mut grid = Grid::new(4, 20, 4, Palette::default());
-        grid.show = false;
-        grid
     }
 
     fn six() -> Grid {
@@ -1013,51 +1224,6 @@ mod test {
         let mut parse = vte::Parser::new();
         parse.advance(&mut grid, b"\x1b[2;5r\x1b[1;1H\x1b[6n");
         assert_eq!(grid.take_reply(), b"\x1b[2;1R");
-    }
-
-    #[test]
-    fn select_reads_text() {
-        let mut grid = marked_grid();
-        let mut parse = vte::Parser::new();
-        parse.advance(&mut grid, b"hello world\r\nsecond\r\n");
-        assert_eq!(grid.selected(), "");
-        grid.select((0, 0), (0, 4));
-        assert_eq!(grid.selected(), "hello");
-        grid.select((0, 0), (1, 5));
-        assert_eq!(grid.selected(), "hello world\nsecond");
-    }
-
-    #[test]
-    fn select_flips_video() {
-        let mut grid = marked_grid();
-        let mut parse = vte::Parser::new();
-        parse.advance(&mut grid, b"ab");
-        grid.select((0, 0), (0, 0));
-        let line = &grid.spans()[0];
-        assert_eq!(line.len(), 2);
-        assert_ne!(line[0].hue, line[1].hue);
-        assert!(line[0].back.is_some());
-        assert!(line[1].back.is_none());
-    }
-
-    #[test]
-    fn scroll_keeps_selection() {
-        let mut grid = marked_grid();
-        let mut parse = vte::Parser::new();
-        parse.advance(&mut grid, b"aa\r\n");
-        grid.select((0, 0), (0, 1));
-        parse.advance(&mut grid, b"bb\r\ncc\r\ndd\r\n");
-        assert_eq!(grid.selected(), "aa");
-    }
-
-    #[test]
-    fn at_maps_window() {
-        let mut grid = marked_grid();
-        let mut parse = vte::Parser::new();
-        parse.advance(&mut grid, b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
-        let (start, stop) = grid.window();
-        assert_eq!(grid.at(0, 0), Some((start, 0)));
-        assert_eq!(grid.at(stop - start, 0), None);
     }
 
     #[test]
@@ -1420,7 +1586,8 @@ mod test {
     }
 
     #[test]
-    fn resize_clears_cells() {        let mut grid = Grid::new(4, 10, 4, Palette::default());
+    fn resize_clears_cells() {
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
         grid.show = false;
         let mut parse = vte::Parser::new();
         parse.advance(&mut grid, b"hi");
@@ -1429,7 +1596,6 @@ mod test {
         parse.advance(&mut grid, b"abc");
         assert_eq!(grid.text(), "abc");
     }
-}
 
     #[test]
     fn title_sets() {
@@ -1514,3 +1680,240 @@ mod test {
         assert_eq!(spans[0][0].text, "hi");
         assert!(!spans[0][1].bold);
     }
+
+    fn kitty_apc(head: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x1b, b'_', b'G'];
+        out.extend_from_slice(head);
+        out.push(b';');
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0x1b, b'\\']);
+        out
+    }
+
+    fn piped(chunks: &[&[u8]]) -> Grid {
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        let mut parse = vte::Parser::new();
+        for chunk in chunks {
+            let (clean, payloads) = grid.split(chunk);
+            for p in &payloads {
+                grid.apc(p);
+            }
+            parse.advance(&mut grid, &clean);
+        }
+        grid
+    }
+
+    #[test]
+    fn kitty_transmit_places() {
+        let raw = [1, 2, 3, 255, 4, 5, 6, 255];
+        let bytes = kitty_apc(b"a=T,f=32,s=2,v=1", BASE64_STANDARD.encode(raw).as_bytes());
+        let grid = piped(&[&bytes]);
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        assert_eq!((pics[0].row, pics[0].col), (0, 0));
+        let (w, h, _) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (2, 1));
+    }
+
+    #[test]
+    fn kitty_chunks_assemble() {
+        let raw = [10, 20, 30, 255, 40, 50, 60, 255];
+        let b64 = BASE64_STANDARD.encode(raw);
+        let (half, rest) = b64.as_bytes().split_at(b64.len() / 2);
+        let first = kitty_apc(b"a=T,f=32,s=2,v=1,m=1", half);
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        let (clean, payloads) = grid.split(&first);
+        assert!(clean.is_empty());
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert!(grid.pics().is_empty());
+        let second = kitty_apc(b"m=0", rest);
+        let (clean, payloads) = grid.split(&second);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        let _ = clean;
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, _) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (2, 1));
+    }
+
+    #[test]
+    fn kitty_delete_frees() {
+        let raw = BASE64_STANDARD.encode([9, 9, 9, 255]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=1,i=9", raw.as_bytes());
+        let mut grid = piped(&[&send]);
+        assert_eq!(grid.pics().len(), 1);
+        assert!(grid.take_reply().windows(7).any(|w| w == b"Gi=9;OK"));
+        let del = kitty_apc(b"a=d,i=9", b"");
+        let (_, payloads) = grid.split(&del);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert!(grid.pics().is_empty());
+        let play = kitty_apc(b"a=p,i=9", b"");
+        let (_, payloads) = grid.split(&play);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.pics().len(), 1);
+        let wipe = kitty_apc(b"a=D,i=9", b"");
+        let (_, payloads) = grid.split(&wipe);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert!(grid.pics().is_empty());
+        let gone = kitty_apc(b"a=p,i=9", b"");
+        let (_, payloads) = grid.split(&gone);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert!(grid.pics().is_empty());
+        assert!(grid.take_reply().windows(11).any(|w| w == b"Gi=9;ENOENT"));
+    }
+
+    #[test]
+    fn sixel_places_pixels() {
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        let mut parse = vte::Parser::new();
+        parse.advance(&mut grid, b"\x1bPq#0;2;100;0;0#0~\x1b\\");
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, _) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (1, 6));
+    }
+
+    #[test]
+    fn iterm_places_png() {
+        let img = ::image::RgbaImage::from_pixel(2, 2, ::image::Rgba([9, 8, 7, 255]));
+        let mut buf = Vec::new();
+        ::image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), ::image::ImageFormat::Png)
+            .unwrap();
+        let mut osc = b"\x1b]1337;File=width=4;height=2:".to_vec();
+        osc.extend_from_slice(BASE64_STANDARD.encode(&buf).as_bytes());
+        osc.push(0x07);
+        let grid = piped(&[&osc]);
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, _) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (2, 2));
+    }
+
+    #[test]
+    fn scroll_moves_images() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=1,r=2", raw.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        let mut parse = vte::Parser::new();
+        let (clean, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        parse.advance(&mut grid, &clean);
+        assert_eq!(grid.pics()[0].row, 0);
+        parse.advance(&mut grid, b"\x1b[H");
+        parse.advance(&mut grid, b"\r\n\r\n\r\n\r\n");
+        assert_eq!(grid.pics()[0].row, -1);
+        parse.advance(&mut grid, b"\r\n\r\n");
+        assert!(grid.pics().is_empty());
+    }
+
+    #[test]
+    fn pics_follow_scroll_offset() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=1", raw.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        let mut parse = vte::Parser::new();
+        parse.advance(&mut grid, b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
+        parse.advance(&mut grid, b"\x1b[H");
+        let (clean, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        parse.advance(&mut grid, &clean);
+        grid.wheel(1.0);
+        assert_eq!(grid.pics()[0].row, 1);
+    }
+
+    #[test]
+    fn evicted_store_skips_pics() {
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        for id in 1..=65u32 {
+            let raw = BASE64_STANDARD.encode([1, 2, 3, 255]);
+            let head = format!("a=T,f=32,s=1,v=1,i={id}");
+            let send = kitty_apc(head.as_bytes(), raw.as_bytes());
+            let (_, payloads) = grid.split(&send);
+            for p in &payloads {
+                grid.apc(p);
+            }
+        }
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 64);
+        assert!(pics.iter().all(|p| grid.entry(p.id).is_some()));
+    }
+
+    #[test]
+    fn region_keeps_straddler() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=1,r=3", raw.as_bytes());
+        let mut grid = Grid::new(6, 10, 6, Palette::default());
+        grid.show = false;
+        let mut parse = vte::Parser::new();
+        let (clean, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        parse.advance(&mut grid, &clean);
+        assert_eq!(grid.pics().len(), 1);
+        parse.advance(&mut grid, b"\x1b[2;5r\x1b[S");
+        assert_eq!(grid.pics().len(), 1);
+    }
+
+    #[test]
+    fn resize_keeps_store() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=1,i=9", raw.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        let (_, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.pics().len(), 1);
+        grid.resize(4, 10);
+        assert!(grid.pics().is_empty());
+        let play = kitty_apc(b"a=p,i=9", b"");
+        let (_, payloads) = grid.split(&play);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.pics().len(), 1);
+    }
+
+    #[test]
+    fn pics_sort_by_z() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let lo = kitty_apc(b"a=T,f=32,s=1,v=1,i=11,z=-1", raw.as_bytes());
+        let hi = kitty_apc(b"a=T,f=32,s=1,v=1,i=12,z=2", raw.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        for send in [&hi, &lo] {
+            let (_, payloads) = grid.split(send);
+            for p in &payloads {
+                grid.apc(p);
+            }
+        }
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 2);
+        assert_eq!((pics[0].id, pics[1].id), (11, 12));
+    }
+}

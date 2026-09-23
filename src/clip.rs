@@ -1,13 +1,9 @@
 #[cfg(target_os = "linux")]
-use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
+use arboard::{GetExtLinux, LinuxClipboardKind};
 
 pub struct Clip;
 
 impl Clip {
-    pub fn copy(text: &str) {
-        Self::put(text);
-    }
-
     pub fn paste(primary: bool) -> String {
         Self::get(primary)
     }
@@ -21,27 +17,6 @@ impl Clip {
             out
         } else {
             text.as_bytes().to_vec()
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn put(text: &str) {
-        if let Ok(mut clip) = arboard::Clipboard::new() {
-            let _ = clip
-                .set()
-                .clipboard(LinuxClipboardKind::Clipboard)
-                .text(text.to_string());
-            let _ = clip
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text.to_string());
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn put(text: &str) {
-        if let Ok(mut clip) = arboard::Clipboard::new() {
-            let _ = clip.set_text(text.to_string());
         }
     }
 
