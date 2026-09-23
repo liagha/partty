@@ -2,7 +2,7 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::clip::Clip;
@@ -208,12 +208,20 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let hot = self.mods.control_key() && self.mods.shift_key();
                 let press = event.state == ElementState::Pressed && !event.repeat;
+                let vee = event.physical_key == PhysicalKey::Code(KeyCode::KeyV);
+                let insert = event.physical_key == PhysicalKey::Code(KeyCode::Insert);
                 match &event.logical_key {
-                    Key::Character(c) if hot && (c == "v" || c == "V") => {
+                    Key::Character(c) if hot && (c == "v" || c == "V" || vee) => {
                         if press {
                             self.paste(false)
                         }
                     }
+                    _ if hot && vee => {
+                        if press {
+                            self.paste(false)
+                        }
+                    }
+                    _ if press && insert && self.mods.shift_key() => self.paste(false),
                     _ => {
                         let bytes = Shell::key(
                             event.state,

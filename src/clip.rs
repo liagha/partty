@@ -5,7 +5,12 @@ pub struct Clip;
 
 impl Clip {
     pub fn paste(primary: bool) -> String {
-        Self::get(primary)
+        let text = Self::get(primary);
+        if text.is_empty() {
+            Self::get(!primary)
+        } else {
+            text
+        }
     }
 
     pub fn wrap(text: &str, bracket: bool) -> Vec<u8> {
