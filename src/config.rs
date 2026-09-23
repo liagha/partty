@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::color::{self, Colors, Palette};
-use crate::text::SIZE;
+use crate::text::{FACE, SIZE};
 
 #[derive(Deserialize, Default)]
 struct File {
@@ -9,6 +9,8 @@ struct File {
     foreground: Option<String>,
     past_bottom: Option<usize>,
     font_size: Option<f32>,
+    mono: Option<String>,
+    fonts: Option<Vec<String>>,
     colors: Option<Colors>,
 }
 
@@ -16,6 +18,8 @@ pub struct Config {
     pub bg: [f64; 3],
     pub below: Option<usize>,
     pub size: f32,
+    pub face: String,
+    pub files: Vec<std::path::PathBuf>,
     pub inks: Palette,
 }
 
@@ -34,13 +38,29 @@ impl Config {
         if local.is_file() {
             return Some(local);
         }
-        let base = std::env::var_os("XDG_CONFIG_HOME")
+        let file = Self::dir()?.join("config.toml");
+        file.is_file().then_some(file)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("APPDATA").map(|base| std::path::PathBuf::from(base).join("partty"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("HOME")
+            .map(|home| std::path::PathBuf::from(home).join("Library/Application Support/partty"))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    fn dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
-            })?;
-        let file = base.join("partty").join("config.toml");
-        file.is_file().then_some(file)
+            })
+            .map(|base| base.join("partty"))
     }
 
     pub fn load_from(path: &std::path::Path) -> Self {
@@ -70,6 +90,8 @@ impl Config {
             bg: Self::linear(back),
             below: file.past_bottom,
             size: file.font_size.filter(|s| (8.0..=96.0).contains(s)).unwrap_or(SIZE),
+            face: file.mono.unwrap_or_else(|| FACE.into()),
+            files: file.fonts.unwrap_or_default().into_iter().map(Into::into).collect(),
             inks,
         }
     }
@@ -138,6 +160,16 @@ mod test {
         assert_eq!(broken.below, None);
         let bad = Config::parse("background = \"nope\"\n");
         assert!(close(bad.bg, empty.bg));
+    }
+
+    #[test]
+    fn parse_mono() {
+        let config = Config::parse("mono = \"JetBrains Mono\"\nfonts = [\"/a.ttf\"]\n");
+        assert_eq!(config.face, "JetBrains Mono");
+        assert_eq!(config.files, vec![std::path::PathBuf::from("/a.ttf")]);
+        let empty = Config::parse("");
+        assert_eq!(empty.face, FACE);
+        assert!(empty.files.is_empty());
     }
 
     #[test]

@@ -28,7 +28,12 @@ impl Shell {
     ) -> (Self, Receiver<Vec<u8>>) {
         let system = portable_pty::native_pty_system();
         let pair = system.openpty(Self::size(rows, cols)).unwrap();
-        let name = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
+        let fallback = if cfg!(target_os = "windows") {
+            "powershell.exe"
+        } else {
+            "bash"
+        };
+        let name = std::env::var("SHELL").unwrap_or_else(|_| fallback.into());
         let mut cmd = portable_pty::CommandBuilder::new(name);
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd).unwrap();

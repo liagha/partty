@@ -1,6 +1,8 @@
 background = "#1e1e1e"
 past_bottom = 15
 font_size = 24
+mono = "JetBrains Mono"
+fonts = ["/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf", "/usr/share/fonts/TTF/JetBrainsMono-Bold.ttf"]
 # foreground = "#e6e6eb"
 # [colors]
 # red = "#cc0000"

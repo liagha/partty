@@ -163,7 +163,14 @@ impl ApplicationHandler for App {
         let window = Arc::new(loop_.create_window(attrs).unwrap());
         let (config, source) = Config::load();
         self.font = config.size;
-        self.view = Some(View::open(window.clone(), loop_, config.bg, config.size));
+        self.view = Some(View::open(
+            window.clone(),
+            loop_,
+            config.bg,
+            config.size,
+            &config.face,
+            &config.files,
+        ));
         let size = window.inner_size();
         let (rows, cols) = Text::cells(
             size.width,

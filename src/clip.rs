@@ -5,19 +5,11 @@ pub struct Clip;
 
 impl Clip {
     pub fn copy(text: &str) {
-        for args in [&[][..], &["--primary"][..]] {
-            if let Ok(mut child) = Command::new("wl-copy")
-                .args(args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-            }
-        }
+        Self::put(text);
+    }
+
+    pub fn paste(primary: bool) -> String {
+        Self::get(primary)
     }
 
     pub fn wrap(text: &str, bracket: bool) -> Vec<u8> {
@@ -32,13 +24,91 @@ impl Clip {
         }
     }
 
-    pub fn paste(primary: bool) -> String {        let mut cmd = Command::new("wl-paste");
-        if primary {
-            cmd.arg("--primary");
+    fn pipe(prog: &str, args: &[&str], text: &str) {
+        if let Ok(mut child) = Command::new(prog)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
         }
-        cmd.output()
+    }
+
+    fn read(prog: &str, args: &[&str]) -> String {
+        Command::new(prog)
+            .args(args)
+            .output()
             .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
             .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn put(text: &str) {
+        Self::pipe("wl-copy", &[], text);
+        Self::pipe("wl-copy", &["--primary"], text);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn put(text: &str) {
+        Self::pipe("pbcopy", &[], text);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn put(text: &str) {
+        Self::pipe("clip", &[], text);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+    fn put(text: &str) {
+        Self::pipe("xclip", &["-selection", "clipboard"], text);
+        Self::pipe("xclip", &["-selection", "primary"], text);
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    fn put(_text: &str) {}
+
+    #[cfg(target_os = "linux")]
+    fn get(primary: bool) -> String {
+        if primary {
+            Self::read("wl-paste", &["--primary"])
+        } else {
+            Self::read("wl-paste", &[])
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get(_primary: bool) -> String {
+        Self::read("pbpaste", &[])
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get(_primary: bool) -> String {
+        Self::read(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8; Get-Clipboard -Raw",
+            ],
+        )
+    }
+
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+    fn get(primary: bool) -> String {
+        if primary {
+            Self::read("xclip", &["-o", "-selection", "primary"])
+        } else {
+            Self::read("xclip", &["-o", "-selection", "clipboard"])
+        }
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    fn get(_primary: bool) -> String {
+        String::new()
     }
 }
 
