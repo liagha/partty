@@ -458,7 +458,9 @@ impl Grid {
         });
         if !ctl.still {
             self.col = (self.col + cols as usize).min(self.cols.saturating_sub(1));
-            self.row = (self.row + rows as usize).min(self.bot);
+            for _ in 0..rows as usize {
+                self.dirty |= self.down();
+            }
         }
         self.dirty = true;
     }
@@ -1945,7 +1947,7 @@ mod test {
         grid.show = false;
         for id in 1..=65u32 {
             let raw = BASE64_STANDARD.encode([1, 2, 3, 255]);
-            let head = format!("a=T,f=32,s=1,v=1,i={id}");
+            let head = format!("a=T,f=32,s=1,v=1,C=1,i={id}");
             let send = kitty_apc(head.as_bytes(), raw.as_bytes());
             let (_, payloads) = grid.split(&send);
             for p in &payloads {
@@ -2173,6 +2175,26 @@ mod test {
         let pics = grid.pics();
         assert_eq!(pics.len(), 1);
         assert_eq!((pics[0].cols, pics[0].rows), (1, 1));
+    }
+
+    #[test]
+    fn place_scrolls_at_bottom() {
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        grid.set_px(8.0, 10.0);
+        let mut parse = vte::Parser::new();
+        parse.advance(&mut grid, b"1\r\n2\r\n3\r\n");
+        let raw = BASE64_STANDARD.encode(vec![7; 1 * 25 * 4]);
+        let send = kitty_apc(b"a=T,f=32,s=1,v=25", raw.as_bytes());
+        let (_, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.text(), "");
+        assert_eq!(grid.cursor(), (3, 1, false, false));
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        assert_eq!((pics[0].row, pics[0].col), (0, 0));
     }
 
     #[test]
