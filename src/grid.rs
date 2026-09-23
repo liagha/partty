@@ -333,7 +333,7 @@ impl Grid {
 
     fn send(&mut self, ctl: Ctl, data: &[u8]) {
         let raw = if ctl.wire == b'd' {
-            let Ok(raw) = BASE64_STANDARD.decode(data) else {
+            let Some(raw) = image::b64(data) else {
                 if Self::debug() {
                     eprintln!("partty: image base64 failed id={}", ctl.id);
                 }
@@ -421,7 +421,7 @@ impl Grid {
         }
         if !data.is_empty() {
             let raw = if ctl.wire == b'd' {
-                let Ok(raw) = BASE64_STANDARD.decode(data) else {
+                let Some(raw) = image::b64(data) else {
                     return;
                 };
                 raw
@@ -923,7 +923,7 @@ impl Perform for Grid {
                 if mid.contains(&b'>') {
                     self.answer("\x1b[>0;10;0c");
                 } else {
-                    self.answer("\x1b[?6c");
+                    self.answer("\x1b[?62c");
                 }
             }
             'n' => match arg(0, 0) {
@@ -1334,7 +1334,7 @@ mod test {
 
     #[test]
     fn da_answers() {
-        assert_eq!(asked(&["\x1b[c"]), b"\x1b[?6c".to_vec());
+        assert_eq!(asked(&["\x1b[c"]), b"\x1b[?62c".to_vec());
         assert_eq!(asked(&["\x1b[>c"]), b"\x1b[>0;10;0c".to_vec());
     }
 
@@ -2115,6 +2115,47 @@ mod test {
         let (w, h, bytes) = grid.entry(pics[0].id).unwrap();
         assert_eq!((w, h), (8, 8));
         assert_eq!(bytes.len(), 8 * 8 * 4);
+        assert!(grid.take_reply().is_empty());
+    }
+
+    #[test]
+    fn icat_raw_framing() {
+        use std::io::Write;
+        let mut rgb = Vec::new();
+        for y in 0..16u8 {
+            for x in 0..16u8 {
+                rgb.extend_from_slice(&[x * 16, y * 16, 200]);
+            }
+        }
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&rgb).unwrap();
+        let zip = enc.finish().unwrap();
+        let b64 = BASE64_STANDARD.encode(&zip).replace('=', "");
+        let mut stream = Vec::new();
+        let mut first = b"Ga=T,q=2,f=24,o=z,m=1,s=16,v=16;".to_vec();
+        first.extend_from_slice(&b64.as_bytes()[..b64.len() / 2]);
+        let mut last = b"Ga=T,q=2;".to_vec();
+        last.extend_from_slice(&b64.as_bytes()[b64.len() / 2..]);
+        for part in [&first, &last] {
+            stream.push(0x1b);
+            stream.push(b'_');
+            stream.extend_from_slice(part);
+            stream.extend_from_slice(&[0x1b, b'\\']);
+        }
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        for chunk in stream.chunks(5000) {
+            let (clean, payloads) = grid.split(chunk);
+            assert!(clean.is_empty());
+            for p in &payloads {
+                grid.apc(p);
+            }
+        }
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, bytes) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (16, 16));
+        assert_eq!(bytes.len(), 16 * 16 * 4);
         assert!(grid.take_reply().is_empty());
     }
 

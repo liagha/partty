@@ -137,6 +137,18 @@ fn num(raw: &[u8]) -> Option<u32> {
     std::str::from_utf8(raw).ok()?.parse().ok()
 }
 
+pub fn b64(data: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let mut raw: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+    while raw.len() % 4 != 0 {
+        if raw.len() % 4 == 1 {
+            return None;
+        }
+        raw.push(b'=');
+    }
+    BASE64_STANDARD.decode(&raw).ok()
+}
+
 pub fn kitty(payload: &[u8]) -> Option<(Ctl, Vec<u8>)> {
     let (head, data) = match payload.iter().position(|&b| b == b';') {
         Some(at) => payload.split_at(at),
@@ -196,7 +208,7 @@ pub fn kitty(payload: &[u8]) -> Option<(Ctl, Vec<u8>)> {
 pub fn load(wire: u8, data: &[u8]) -> Option<Vec<u8>> {
     match wire {
         b'f' | b't' | b's' => {
-            let path = String::from_utf8(BASE64_STANDARD.decode(data).ok()?).ok()?;
+            let path = String::from_utf8(b64(data)?).ok()?;
             let raw = std::fs::read(&path).or_else(|_| {
                 if wire == b's' && !path.contains('/') {
                     std::fs::read(format!("/dev/shm/{path}"))
@@ -430,14 +442,10 @@ pub fn file(head: &[u8], data: &[u8]) -> Option<File> {
             _ => {}
         }
     }
-    let mut raw: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
-    while raw.len() % 4 == 1 {
-        raw.pop();
-    }
     Some(File {
         cols,
         rows,
-        png: BASE64_STANDARD.decode(&raw).ok()?,
+        png: b64(data)?,
     })
 }
 
@@ -512,8 +520,17 @@ mod test {
     }
 
     #[test]
-    fn kitty_headless() {
-        let (ctl, data) = kitty(b"Gi=31,a=q").unwrap();
+    fn b64_padded_and_raw() {
+        assert_eq!(b64(b"MTIz").unwrap(), b"123");
+        assert_eq!(b64(b"TWE=").unwrap(), b"Ma");
+        assert_eq!(b64(b"TQ==").unwrap(), b"M");
+        assert_eq!(b64(b" T Q = =\n").unwrap(), b"M");
+        assert!(b64(b"*****").is_none());
+        assert!(b64(b"ABCDE").is_none());
+    }
+
+    #[test]
+    fn kitty_headless() {        let (ctl, data) = kitty(b"Gi=31,a=q").unwrap();
         assert_eq!((ctl.act, ctl.id), (b'q', 31));
         assert!(data.is_empty());
         assert!(kitty(b"nope").is_none());
