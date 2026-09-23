@@ -15,6 +15,7 @@ use crate::grid::Pic;
 use crate::text::Geo;
 
 const MAX: usize = 512;
+const SIDE: u32 = 8192;
 
 const SHADER: &str = r#"
 struct U { size: vec2<f32>, };
@@ -43,6 +44,7 @@ pub struct Draw {
     pub u1: f32,
     pub v1: f32,
     pub id: u32,
+    pub z: i32,
 }
 
 pub fn rects(
@@ -101,6 +103,7 @@ pub fn rects(
             u1,
             v1,
             id: p.id,
+            z: p.z,
         });
     }
     out
@@ -263,7 +266,10 @@ impl Pics {
         h: u32,
         rgba: &[u8],
     ) {
-        if w == 0 || h == 0 || rgba.len() != w as usize * h as usize * 4 {
+        if w == 0 || h == 0 || w > SIDE || h > SIDE {
+            return;
+        }
+        if rgba.len() != w as usize * h as usize * 4 {
             return;
         }
         let texture = device.create_texture(&TextureDescriptor {
@@ -342,13 +348,24 @@ impl Pics {
         self.count = (n * 6) as u32;
     }
 
-    pub fn draw<'a>(&'a self, pass: &mut RenderPass<'a>) {
+    pub fn below<'a>(&'a self, pass: &mut RenderPass<'a>) {
+        self.layer(pass, false);
+    }
+
+    pub fn above<'a>(&'a self, pass: &mut RenderPass<'a>) {
+        self.layer(pass, true);
+    }
+
+    fn layer<'a>(&'a self, pass: &mut RenderPass<'a>, top: bool) {
         if self.count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipe);
         pass.set_bind_group(0, &self.ugroup, &[]);
         for (i, d) in self.draws.iter().enumerate() {
+            if (d.z >= 0) != top {
+                continue;
+            }
             let Some(tile) = self.tiles.get(&d.id) else {
                 continue;
             };
@@ -431,5 +448,18 @@ mod test {
         assert_eq!((d.x, d.y), (5.0, 0.0));
         assert_eq!((d.u0, d.v0), (0.0, 0.25));
         assert_eq!(d.id, 3);
+    }
+
+    #[test]
+    fn draw_keeps_layer() {
+        let pics = vec![
+            Pic { id: 1, row: 0, col: 0, rows: 1, cols: 1, z: -2 },
+            Pic { id: 2, row: 0, col: 1, rows: 1, cols: 1, z: 3 },
+        ];
+        let out = rects(&pics, &|_| Some((10, 20)), &geo());
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].z, out[1].z), (-2, 3));
+        assert!(out.iter().filter(|d| d.z < 0).count() == 1);
+        assert!(out.iter().filter(|d| d.z >= 0).count() == 1);
     }
 }

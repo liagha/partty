@@ -312,12 +312,22 @@ impl Grid {
     }
 
     fn send(&mut self, ctl: Ctl, data: &[u8]) {
-        let Ok(raw) = BASE64_STANDARD.decode(data) else {
+        let raw = if ctl.wire == b'd' {
+            let Ok(raw) = BASE64_STANDARD.decode(data) else {
+                return;
+            };
+            raw
+        } else {
+            let Some(raw) = image::load(ctl.wire, data) else {
+                return;
+            };
+            raw
+        };
+        let Some(entry) = image::decode(ctl.fmt, ctl.img_w, ctl.img_h, ctl.comp, &raw)
+        else {
             return;
         };
-        let Some(entry) = image::decode(ctl.fmt, ctl.img_w, ctl.img_h, &raw) else {
-            return;
-        };
+        let calm = ctl.calm;
         if ctl.id == 0 {
             let id = self.ids;
             self.ids = self.ids.wrapping_sub(1);
@@ -330,18 +340,24 @@ impl Grid {
             if let Some(old) = self.store.put(id, entry) {
                 self.places.retain(|p| p.id != old);
             }
-            self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+            if !calm {
+                self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+            }
             self.place(id, ctl);
         }
     }
 
     fn play(&mut self, ctl: Ctl) {
         if self.store.get(ctl.id).is_none() {
-            self.answer(&format!("\x1b_Gi={};ENOENT\x1b\\", ctl.id));
+            if !ctl.calm {
+                self.answer(&format!("\x1b_Gi={};ENOENT\x1b\\", ctl.id));
+            }
             return;
         }
         let id = ctl.id;
-        self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+        if !ctl.calm {
+            self.answer(&format!("\x1b_Gi={id};OK\x1b\\"));
+        }
         self.place(id, ctl);
     }
 
@@ -362,10 +378,26 @@ impl Grid {
     }
 
     fn probe(&mut self, ctl: Ctl, data: &[u8]) {
-        let Ok(raw) = BASE64_STANDARD.decode(data) else {
+        if !matches!(ctl.fmt, 24 | 32 | 100) {
             return;
-        };
-        if image::decode(ctl.fmt, ctl.img_w, ctl.img_h, &raw).is_some() {
+        }
+        if !data.is_empty() {
+            let raw = if ctl.wire == b'd' {
+                let Ok(raw) = BASE64_STANDARD.decode(data) else {
+                    return;
+                };
+                raw
+            } else {
+                let Some(raw) = image::load(ctl.wire, data) else {
+                    return;
+                };
+                raw
+            };
+            if image::decode(ctl.fmt, ctl.img_w, ctl.img_h, ctl.comp, &raw).is_none() {
+                return;
+            }
+        }
+        if !ctl.calm {
             self.answer(&format!("\x1b_Gi={};OK\x1b\\", ctl.id));
         }
     }
@@ -859,8 +891,21 @@ impl Perform for Grid {
                 _ => {}
             },
             't' => {
-                if arg(0, 0) == 18 {
-                    self.answer(&format!("\x1b[8;{};{}t", self.rows, self.cols));
+                match arg(0, 0) {
+                    14 => {
+                        let w = (self.cols as f32 * self.px.0).round() as u32;
+                        let h = (self.rows as f32 * self.px.1).round() as u32;
+                        self.answer(&format!("\x1b[4;{h};{w}t"));
+                    }
+                    16 => {
+                        let w = self.px.0.round() as u32;
+                        let h = self.px.1.round() as u32;
+                        self.answer(&format!("\x1b[6;{h};{w}t"));
+                    }
+                    18 => {
+                        self.answer(&format!("\x1b[8;{};{}t", self.rows, self.cols));
+                    }
+                    _ => {}
                 }
             }
             'h' | 'l' => {
@@ -932,7 +977,7 @@ impl Perform for Grid {
                     head.extend_from_slice(lead);
                 }
                 if let Some(f) = image::file(&head, data) {
-                        if let Some(entry) = image::decode(100, 0, 0, &f.png) {
+                        if let Some(entry) = image::decode(100, 0, 0, 0, &f.png) {
                             let id = self.ids;
                             self.ids = self.ids.wrapping_sub(1);
                             let (cols, rows) = image::cells_for(
@@ -1915,5 +1960,117 @@ mod test {
         let pics = grid.pics();
         assert_eq!(pics.len(), 2);
         assert_eq!((pics[0].id, pics[1].id), (11, 12));
+    }
+
+    #[test]
+    fn probe_headless_answers() {
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        let query = vec![0x1b, b'_', b'G', b'i', b'=', b'3', b'1', b',', b'a', b'=', b'q', 0x1b, b'\\'];
+        let (_, payloads) = grid.split(&query);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.take_reply(), b"\x1b_Gi=31;OK\x1b\\");
+    }
+
+    #[test]
+    fn probe_bad_fmt_silent() {
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        let query = kitty_apc(b"a=q,f=7,i=9", b"");
+        let (_, payloads) = grid.split(&query);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert!(grid.take_reply().is_empty());
+    }
+
+    #[test]
+    fn quiet_transmit_silent() {
+        let raw = BASE64_STANDARD.encode([7, 7, 7, 255]);
+        let send = kitty_apc(b"a=T,q=2,f=32,s=1,v=1,i=21", raw.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        let (_, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.pics().len(), 1);
+        assert!(grid.take_reply().is_empty());
+        let play = kitty_apc(b"a=p,q=2,i=21", b"");
+        let (_, payloads) = grid.split(&play);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        assert_eq!(grid.pics().len(), 2);
+        assert!(grid.take_reply().is_empty());
+    }
+
+    #[test]
+    fn file_transmit_reads() {
+        let path = std::env::temp_dir().join("partty-test-kitty.bin");
+        std::fs::write(&path, [1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        let enc = BASE64_STANDARD.encode(path.to_str().unwrap());
+        let send = kitty_apc(b"a=T,f=32,s=2,v=1,t=f,i=22", enc.as_bytes());
+        let mut grid = Grid::new(4, 10, 4, Palette::default());
+        grid.show = false;
+        let (_, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        std::fs::remove_file(&path).ok();
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, _) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (2, 1));
+    }
+
+    #[test]
+    fn icat_like_stream() {
+        use std::io::Write;
+        let mut rgb = Vec::new();
+        for y in 0..8u8 {
+            for x in 0..8u8 {
+                rgb.extend_from_slice(&[x * 32, y * 32, 128]);
+            }
+        }
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&rgb).unwrap();
+        let zip = enc.finish().unwrap();
+        let b64 = BASE64_STANDARD.encode(&zip);
+        let mut stream = Vec::new();
+        let mut first = b"Ga=T,q=2,f=24,o=z,m=1,s=8,v=8;".to_vec();
+        first.extend_from_slice(&b64.as_bytes()[..b64.len() / 2]);
+        let mut mid = b"Ga=T,q=2,m=1;".to_vec();
+        mid.extend_from_slice(&b64.as_bytes()[b64.len() / 2..b64.len() * 3 / 4]);
+        let mut last = b"Ga=T,q=2;".to_vec();
+        last.extend_from_slice(&b64.as_bytes()[b64.len() * 3 / 4..]);
+        for part in [&first, &mid, &last] {
+            stream.push(0x1b);
+            stream.push(b'_');
+            stream.extend_from_slice(part);
+            stream.extend_from_slice(&[0x1b, b'\\']);
+        }
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        for chunk in stream.chunks(4096) {
+            let (clean, payloads) = grid.split(chunk);
+            assert!(clean.is_empty());
+            for p in &payloads {
+                grid.apc(p);
+            }
+        }
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        let (w, h, bytes) = grid.entry(pics[0].id).unwrap();
+        assert_eq!((w, h), (8, 8));
+        assert_eq!(bytes.len(), 8 * 8 * 4);
+        assert!(grid.take_reply().is_empty());
+    }
+
+    #[test]
+    fn winops_pixel_reports() {
+        assert_eq!(asked(&["\x1b[14t"]), b"\x1b[4;64;80t".to_vec());
+        assert_eq!(asked(&["\x1b[16t"]), b"\x1b[6;16;8t".to_vec());
+        assert_eq!(asked(&["\x1b[18t"]), b"\x1b[8;4;10t".to_vec());
     }
 }

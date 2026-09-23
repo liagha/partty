@@ -128,6 +128,9 @@ pub struct Ctl {
     pub still: bool,
     pub z: i32,
     pub more: bool,
+    pub calm: bool,
+    pub comp: u8,
+    pub wire: u8,
 }
 
 fn num(raw: &[u8]) -> Option<u32> {
@@ -135,8 +138,10 @@ fn num(raw: &[u8]) -> Option<u32> {
 }
 
 pub fn kitty(payload: &[u8]) -> Option<(Ctl, Vec<u8>)> {
-    let at = payload.iter().position(|&b| b == b';')?;
-    let (head, data) = payload.split_at(at);
+    let (head, data) = match payload.iter().position(|&b| b == b';') {
+        Some(at) => payload.split_at(at),
+        None => (payload, &[][..]),
+    };
     if head.first() != Some(&b'G') {
         return None;
     }
@@ -151,10 +156,18 @@ pub fn kitty(payload: &[u8]) -> Option<(Ctl, Vec<u8>)> {
         still: false,
         z: 0,
         more: false,
+        calm: false,
+        comp: 0,
+        wire: b'd',
     };
     for kv in head[1..].split(|&b| b == b',') {
+        if kv.is_empty() {
+            continue;
+        }
         let mut pair = kv.splitn(2, |&b| b == b'=');
-        let (key, val) = (pair.next()?, pair.next()?);
+        let (Some(key), Some(val)) = (pair.next(), pair.next()) else {
+            continue;
+        };
         match key {
             b"a" => ctl.act = val.first().copied().unwrap_or(b'T'),
             b"i" => ctl.id = num(val)?,
@@ -166,13 +179,50 @@ pub fn kitty(payload: &[u8]) -> Option<(Ctl, Vec<u8>)> {
             b"C" => ctl.still = val == b"1",
             b"z" => ctl.z = std::str::from_utf8(val).ok()?.parse().ok()?,
             b"m" => ctl.more = val == b"1",
+            b"q" => ctl.calm = val == b"2",
+            b"o" => ctl.comp = val.first().copied().unwrap_or(0),
+            b"t" => ctl.wire = val.first().copied().unwrap_or(b'd'),
             _ => {}
         }
     }
-    Some((ctl, data[1..].to_vec()))
+    let data = if data.is_empty() {
+        Vec::new()
+    } else {
+        data[1..].to_vec()
+    };
+    Some((ctl, data))
 }
 
-pub fn decode(fmt: u8, w: u32, h: u32, data: &[u8]) -> Option<Entry> {
+pub fn load(wire: u8, data: &[u8]) -> Option<Vec<u8>> {
+    match wire {
+        b'f' | b't' | b's' => {
+            let path = String::from_utf8(BASE64_STANDARD.decode(data).ok()?).ok()?;
+            let raw = std::fs::read(&path).ok()?;
+            if wire == b't' && path.contains("tty-graphics-protocol") {
+                let _ = std::fs::remove_file(&path);
+            }
+            Some(raw)
+        }
+        _ => None,
+    }
+}
+
+fn press(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::ZlibDecoder::new(data).read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+pub fn decode(fmt: u8, w: u32, h: u32, comp: u8, data: &[u8]) -> Option<Entry> {
+    let owned;
+    let data = match comp {
+        b'z' => {
+            owned = press(data)?;
+            &owned
+        }
+        _ => data,
+    };
     match fmt {
         100 => {
             let img = image::load_from_memory(data).ok()?.to_rgba8();
@@ -455,16 +505,71 @@ mod test {
     }
 
     #[test]
+    fn kitty_headless() {
+        let (ctl, data) = kitty(b"Gi=31,a=q").unwrap();
+        assert_eq!((ctl.act, ctl.id), (b'q', 31));
+        assert!(data.is_empty());
+        assert!(kitty(b"nope").is_none());
+    }
+
+    #[test]
+    fn kitty_skips_bare() {
+        let (ctl, _) = kitty(b"Ga=T,odd,f=24;QUJD").unwrap();
+        assert_eq!(ctl.fmt, 24);
+    }
+
+    #[test]
+    fn kitty_quiet_comp_wire() {
+        let (ctl, _) = kitty(b"Ga=T,q=2,f=24,o=z,t=f;QUJD").unwrap();
+        assert!(ctl.calm);
+        assert_eq!(ctl.comp, b'z');
+        assert_eq!(ctl.wire, b'f');
+    }
+
+    #[test]
+    fn decode_zip() {
+        use std::io::Write;
+        let rgb = vec![10, 20, 30, 40, 50, 60];
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&rgb).unwrap();
+        let zip = enc.finish().unwrap();
+        let e = decode(24, 2, 1, b'z', &zip).unwrap();
+        assert_eq!(e.rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+        assert!(decode(24, 2, 1, b'z', b"nope").is_none());
+    }
+
+    #[test]
+    fn load_file() {
+        let path = std::env::temp_dir().join("partty-test-img.bin");
+        std::fs::write(&path, [7, 8, 9]).unwrap();
+        let enc = BASE64_STANDARD.encode(path.to_str().unwrap());
+        let raw = load(b'f', enc.as_bytes()).unwrap();
+        assert_eq!(raw, [7, 8, 9]);
+        std::fs::remove_file(&path).ok();
+        assert!(load(b'f', b"****").is_none());
+        assert!(load(b'd', b"QUJD").is_none());
+    }
+
+    #[test]
+    fn load_temp_cleans() {
+        let path = std::env::temp_dir().join("tty-graphics-protocol-test.bin");
+        std::fs::write(&path, [1]).unwrap();
+        let enc = BASE64_STANDARD.encode(path.to_str().unwrap());
+        assert_eq!(load(b't', enc.as_bytes()).unwrap(), [1]);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn decode_raw() {
         let rgba = vec![10, 20, 30, 40, 50, 60, 70, 80];
-        let e = decode(32, 2, 1, &rgba).unwrap();
+        let e = decode(32, 2, 1, 0, &rgba).unwrap();
         assert_eq!((e.w, e.h), (2, 1));
         assert_eq!(e.rgba, rgba);
         let rgb = vec![10, 20, 30];
-        let e = decode(24, 1, 1, &rgb).unwrap();
+        let e = decode(24, 1, 1, 0, &rgb).unwrap();
         assert_eq!(e.rgba, vec![10, 20, 30, 255]);
-        assert!(decode(32, 2, 1, &[1, 2]).is_none());
-        assert!(decode(7, 1, 1, &[1]).is_none());
+        assert!(decode(32, 2, 1, 0, &[1, 2]).is_none());
+        assert!(decode(7, 1, 1, 0, &[1]).is_none());
     }
 
     #[test]
@@ -474,7 +579,7 @@ mod test {
         image::DynamicImage::ImageRgba8(img)
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
-        let e = decode(100, 0, 0, &buf).unwrap();
+        let e = decode(100, 0, 0, 0, &buf).unwrap();
         assert_eq!((e.w, e.h), (2, 3));
         assert_eq!(&e.rgba[..4], &[9, 8, 7, 255]);
     }

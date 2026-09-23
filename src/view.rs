@@ -205,8 +205,9 @@ impl View {
                 multiview_mask: None,
             });
             self.fill.draw(&mut pass);
-            self.pics.draw(&mut pass);
+            self.pics.below(&mut pass);
             self.text.render(&mut pass);
+            self.pics.above(&mut pass);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);

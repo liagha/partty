@@ -1879,6 +1879,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "base64",
+ "flate2",
  "glyphon",
  "image",
  "pollster",
