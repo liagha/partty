@@ -310,6 +310,18 @@ impl Grid {
             }
             None => (ctl, data),
         };
+        if Self::debug() {
+            eprintln!(
+                "partty: apc act={} id={} fmt={} wire={} comp={} calm={} bytes={}",
+                ctl.act as char,
+                ctl.id,
+                ctl.fmt,
+                ctl.wire as char,
+                ctl.comp as char,
+                ctl.calm,
+                data.len()
+            );
+        }
         match ctl.act {
             b'T' => self.send(ctl, &data),
             b'p' => self.play(ctl),
@@ -322,19 +334,34 @@ impl Grid {
     fn send(&mut self, ctl: Ctl, data: &[u8]) {
         let raw = if ctl.wire == b'd' {
             let Ok(raw) = BASE64_STANDARD.decode(data) else {
+                if Self::debug() {
+                    eprintln!("partty: image base64 failed id={}", ctl.id);
+                }
                 return;
             };
             raw
         } else {
             let Some(raw) = image::load(ctl.wire, data) else {
+                if Self::debug() {
+                    eprintln!("partty: image file failed id={}", ctl.id);
+                }
                 return;
             };
             raw
         };
         let Some(entry) = image::decode(ctl.fmt, ctl.img_w, ctl.img_h, ctl.comp, &raw)
         else {
+            if Self::debug() {
+                eprintln!(
+                    "partty: image decode failed id={} fmt={} {}x{} comp={} raw={}",
+                    ctl.id, ctl.fmt, ctl.img_w, ctl.img_h, ctl.comp as char, raw.len()
+                );
+            }
             return;
         };
+        if Self::debug() {
+            eprintln!("partty: image got id={} {}x{}", ctl.id, entry.w, entry.h);
+        }
         let calm = ctl.calm;
         if ctl.id == 0 {
             let id = self.ids;
@@ -387,6 +414,9 @@ impl Grid {
 
     fn probe(&mut self, ctl: Ctl, data: &[u8]) {
         if !matches!(ctl.fmt, 24 | 32 | 100) {
+            if Self::debug() {
+                eprintln!("partty: probe bad fmt={}", ctl.fmt);
+            }
             return;
         }
         if !data.is_empty() {
@@ -435,6 +465,13 @@ impl Grid {
 
     fn answer(&mut self, text: &str) {
         self.reply.extend_from_slice(text.as_bytes());
+    }
+
+    fn debug() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var_os("PARTY_DEBUG").is_some_and(|v| v != "0")
+        })
     }
 
     fn empty(&self) -> Cell {
@@ -903,11 +940,17 @@ impl Perform for Grid {
                     14 => {
                         let w = (self.cols as f32 * self.px.0).round() as u32;
                         let h = (self.rows as f32 * self.px.1).round() as u32;
+                        if Self::debug() {
+                            eprintln!("partty: winops 14 -> {w}x{h}");
+                        }
                         self.answer(&format!("\x1b[4;{h};{w}t"));
                     }
                     16 => {
                         let w = self.px.0.round() as u32;
                         let h = self.px.1.round() as u32;
+                        if Self::debug() {
+                            eprintln!("partty: winops 16 -> {w}x{h}");
+                        }
                         self.answer(&format!("\x1b[6;{h};{w}t"));
                     }
                     18 => {
