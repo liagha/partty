@@ -261,6 +261,14 @@ impl Grid {
         self.store.get(id).map(|e| (e.w, e.h, e.rgba.as_slice()))
     }
 
+    pub fn dims(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    pub fn px(&self) -> (f32, f32) {
+        self.px
+    }
+
     pub fn pics(&self) -> Vec<Pic> {
         let mut out = Vec::new();
         for p in &self.places {

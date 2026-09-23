@@ -12,12 +12,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    fn size(rows: usize, cols: usize) -> portable_pty::PtySize {
+    fn size(rows: usize, cols: usize, wide: u16, high: u16) -> portable_pty::PtySize {
         portable_pty::PtySize {
             rows: rows.min(u16::MAX as usize) as u16,
             cols: cols.min(u16::MAX as usize) as u16,
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: wide,
+            pixel_height: high,
         }
     }
 
@@ -27,7 +27,7 @@ impl Shell {
         wake: EventLoopProxy<()>,
     ) -> (Self, Receiver<Vec<u8>>) {
         let system = portable_pty::native_pty_system();
-        let pair = system.openpty(Self::size(rows, cols)).unwrap();
+        let pair = system.openpty(Self::size(rows, cols, 0, 0)).unwrap();
         let fallback = if cfg!(target_os = "windows") {
             "powershell.exe"
         } else {
@@ -69,10 +69,10 @@ impl Shell {
         let _ = self.writer.flush();
     }
 
-    pub fn resize(&self, rows: usize, cols: usize) -> Result<(), String> {
+    pub fn resize(&self, rows: usize, cols: usize, wide: u16, high: u16) -> Result<(), String> {
         self._pair
             .master
-            .resize(Self::size(rows, cols))
+            .resize(Self::size(rows, cols, wide, high))
             .map_err(|e| e.to_string())
     }
 

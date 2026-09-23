@@ -26,6 +26,7 @@ pub struct App {
     drag: bool,
     held: u8,
     font: f32,
+    winsz: (usize, usize, u16, u16),
     next: Option<std::time::Instant>,
 }
 
@@ -88,6 +89,20 @@ impl App {
             let pics = self.grid.pics();
             view.pics(&pics, &|id| self.grid.entry(id));
         }
+        self.sync();
+    }
+
+    fn sync(&mut self) {
+        let (rows, cols) = self.grid.dims();
+        let (cw, ch) = self.grid.px();
+        let wide = (cols as f32 * cw).round().clamp(0.0, u16::MAX as f32) as u16;
+        let high = (rows as f32 * ch).round().clamp(0.0, u16::MAX as f32) as u16;
+        if self.winsz != (rows, cols, wide, high) {
+            self.winsz = (rows, cols, wide, high);
+            if let Some(shell) = self.shell.as_mut() {
+                let _ = shell.resize(rows, cols, wide, high);
+            }
+        }
     }
 
     fn press(&mut self, button: MouseButton, state: ElementState) {
@@ -140,9 +155,6 @@ impl App {
             self.font,
         );
         self.grid.resize(rows, cols);
-        if let Some(shell) = self.shell.as_mut() {
-            let _ = shell.resize(rows, cols);
-        }
         self.show();
     }
 }

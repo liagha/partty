@@ -197,7 +197,14 @@ pub fn load(wire: u8, data: &[u8]) -> Option<Vec<u8>> {
     match wire {
         b'f' | b't' | b's' => {
             let path = String::from_utf8(BASE64_STANDARD.decode(data).ok()?).ok()?;
-            let raw = std::fs::read(&path).ok()?;
+            let raw = std::fs::read(&path).or_else(|_| {
+                if wire == b's' && !path.contains('/') {
+                    std::fs::read(format!("/dev/shm/{path}"))
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                }
+            });
+            let raw = raw.ok()?;
             if wire == b't' && path.contains("tty-graphics-protocol") {
                 let _ = std::fs::remove_file(&path);
             }
