@@ -85,7 +85,7 @@ impl App {
         let styled = self.grid.spans();
         if let Some(view) = self.view.as_mut() {
             let geo = view.show(&styled);
-            self.grid.set_px(geo.adv, geo.step);
+            self.grid.set_px(geo.adv * geo.scale, geo.step * geo.scale);
             let pics = self.grid.pics();
             view.pics(&pics, &|id| self.grid.entry(id));
         }

@@ -2160,6 +2160,22 @@ mod test {
     }
 
     #[test]
+    fn place_uses_device_cells() {
+        let raw = BASE64_STANDARD.encode(vec![7; 10 * 10 * 4]);
+        let send = kitty_apc(b"a=T,f=32,s=10,v=10", raw.as_bytes());
+        let mut grid = Grid::new(24, 80, 24, Palette::default());
+        grid.show = false;
+        grid.set_px(20.0, 40.0);
+        let (_, payloads) = grid.split(&send);
+        for p in &payloads {
+            grid.apc(p);
+        }
+        let pics = grid.pics();
+        assert_eq!(pics.len(), 1);
+        assert_eq!((pics[0].cols, pics[0].rows), (1, 1));
+    }
+
+    #[test]
     fn winops_pixel_reports() {
         assert_eq!(asked(&["\x1b[14t"]), b"\x1b[4;64;80t".to_vec());
         assert_eq!(asked(&["\x1b[16t"]), b"\x1b[6;16;8t".to_vec());
